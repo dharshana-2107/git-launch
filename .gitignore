@@ -1,0 +1,12 @@
+# Go
+api/server
+api/bin/
+# Node
+web/node_modules/
+web/dist/
+# OS / editors
+.DS_Store
+.idea/
+.vscode/
+.env
+web/*.tsbuildinfo

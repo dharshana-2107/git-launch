@@ -1,0 +1,130 @@
+// Command server starts the Launchpad REST API.
+//
+// Start-up order: load config -> connect to Postgres -> run migrations ->
+// register routes -> listen. On Ctrl+C (or SIGTERM from Docker) it stops
+// accepting new requests and lets in-flight ones finish ("graceful shutdown").
+package main
+
+import (
+	"context"
+	"errors"
+	"log/slog"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"launchpad/api/internal/config"
+	"launchpad/api/internal/db"
+	"launchpad/api/internal/httpx"
+	"launchpad/api/internal/project"
+)
+
+func main() {
+	if err := run(); err != nil {
+		slog.Error("server stopped", "err", err)
+		os.Exit(1)
+	}
+}
+
+// run holds the real start-up logic and returns errors instead of exiting,
+// which keeps main tiny and makes every failure path explicit.
+func run() error {
+	cfg := config.Load()
+
+	// ctx is cancelled when the process receives Ctrl+C or SIGTERM.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	pool, err := db.Connect(ctx, cfg.DatabaseURL)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+
+	if err := db.Migrate(ctx, pool); err != nil {
+		return err
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/health", func(w http.ResponseWriter, r *http.Request) {
+		httpx.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	})
+	project.NewHandler(project.NewPostgresStore(pool)).Register(mux)
+
+	srv := &http.Server{
+		Addr:              ":" + cfg.Port,
+		Handler:           withRecover(withLogging(mux)),
+		ReadHeaderTimeout: 10 * time.Second, // guards against slow-header (Slowloris) clients
+	}
+
+	// ListenAndServe blocks, so it runs in its own goroutine while this one
+	// waits for either a shutdown signal or a server error.
+	errCh := make(chan error, 1)
+	go func() {
+		slog.Info("api listening", "port", cfg.Port)
+		errCh <- srv.ListenAndServe()
+	}()
+
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, http.ErrServerClosed) {
+			return err
+		}
+	case <-ctx.Done():
+		slog.Info("shutting down")
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return srv.Shutdown(shutdownCtx)
+}
+
+// --- middleware --------------------------------------------------------------
+// A middleware wraps a handler to add behaviour to EVERY request, so that code
+// is written once instead of in each handler.
+
+// statusRecorder remembers the status code a handler wrote, for logging.
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (s *statusRecorder) WriteHeader(code int) {
+	s.status = code
+	s.ResponseWriter.WriteHeader(code)
+}
+
+// Flush passes through to the real writer; live log streaming (SSE) in
+// phase 2 needs it to push each line immediately.
+func (s *statusRecorder) Flush() {
+	if f, ok := s.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// withLogging logs method, path, status and duration for every request.
+func withLogging(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(rec, r)
+		slog.Info("request", "method", r.Method, "path", r.URL.Path,
+			"status", rec.status, "duration", time.Since(start).Round(time.Millisecond))
+	})
+}
+
+// withRecover turns a panic inside a handler into a 500 response instead of
+// crashing the whole server.
+func withRecover(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if p := recover(); p != nil {
+				slog.Error("panic", "value", p, "path", r.URL.Path)
+				httpx.WriteError(w, http.StatusInternalServerError, "internal error")
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
+}
