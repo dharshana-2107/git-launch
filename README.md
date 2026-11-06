@@ -1,4 +1,4 @@
-# Launchpad
+# GitLaunch
 
 A self-hosted mini Vercel/Render: point it at a GitHub repo with a Dockerfile and it builds the image, runs it, and serves it at `http://<subdomain>.localhost`, with live build logs, deployment history and one-click rollback.
 
