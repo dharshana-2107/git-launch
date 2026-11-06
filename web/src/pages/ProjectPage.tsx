@@ -2,9 +2,10 @@ import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { api, appUrl, Project } from "../api";
 import ProjectForm from "../components/ProjectForm";
+import Deployments from "../components/Deployments";
 
 // One project: its details, an edit form and delete.
-// Phase 2 adds the Deploy button and live build logs here.
+// The Deployments section below holds the Deploy button and live build logs.
 export default function ProjectPage() {
   const { id } = useParams(); // the :id part of /projects/:id
   const navigate = useNavigate();
@@ -84,10 +85,7 @@ export default function ProjectPage() {
         </dl>
       )}
 
-      <section className="card placeholder">
-        <h2>Deployments</h2>
-        <p className="muted">Deploying and live build logs arrive in phase 2.</p>
-      </section>
+      <Deployments projectId={project.id} />
     </>
   );
 }

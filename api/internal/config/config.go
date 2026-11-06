@@ -5,17 +5,22 @@
 // (the "12-factor app" rule).
 package config
 
-import "os"
+import (
+	"os"
+	"strconv"
+)
 
 type Config struct {
 	Port        string // HTTP port the API listens on
 	DatabaseURL string // Postgres connection string
+	Workers     int    // how many builds may run at the same time
 }
 
 func Load() Config {
 	return Config{
 		Port:        getenv("PORT", "8080"),
 		DatabaseURL: getenv("DATABASE_URL", "postgres://launchpad:launchpad@localhost:5432/launchpad?sslmode=disable"),
+		Workers:     getenvInt("BUILD_WORKERS", 2),
 	}
 }
 
@@ -23,6 +28,14 @@ func Load() Config {
 func getenv(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
+	}
+	return fallback
+}
+
+// getenvInt is getenv for whole numbers; a missing or invalid value uses fallback.
+func getenvInt(key string, fallback int) int {
+	if n, err := strconv.Atoi(os.Getenv(key)); err == nil && n > 0 {
+		return n
 	}
 	return fallback
 }

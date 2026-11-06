@@ -20,6 +20,23 @@ export type ProjectInput = {
   envVars: Record<string, string>;
 };
 
+export type DeploymentStatus = "queued" | "cloning" | "building" | "built" | "failed";
+
+export type Deployment = {
+  id: number;
+  projectId: number;
+  status: DeploymentStatus;
+  commitSha: string;
+  commitMessage: string;
+  imageTag: string;
+  error: string;
+  createdAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+};
+
+export const isFinal = (s: DeploymentStatus) => s === "built" || s === "failed";
+
 // ApiError carries the API's error message plus per-field messages
 // (from 422 validation and 409 conflict responses) so forms can show them.
 export class ApiError extends Error {
@@ -56,7 +73,15 @@ export const api = {
   updateProject: (id: number, input: ProjectInput) =>
     request<Project>(`/api/projects/${id}`, { method: "PUT", body: JSON.stringify(input) }),
   deleteProject: (id: number) => request<void>(`/api/projects/${id}`, { method: "DELETE" }),
+
+  deploy: (projectId: number) =>
+    request<Deployment>(`/api/projects/${projectId}/deployments`, { method: "POST" }),
+  listDeployments: (projectId: number) => request<Deployment[]>(`/api/projects/${projectId}/deployments`),
+  getDeployment: (id: number) => request<Deployment>(`/api/deployments/${id}`),
 };
+
+// URL of a deployment's live event stream (Server-Sent Events).
+export const deploymentEventsUrl = (id: number) => `/api/deployments/${id}/events`;
 
 // The address each app will be served at (Traefik routes it from phase 3).
 export const appUrl = (subdomain: string) => `http://${subdomain}.localhost`;

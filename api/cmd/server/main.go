@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -17,6 +18,7 @@ import (
 
 	"launchpad/api/internal/config"
 	"launchpad/api/internal/db"
+	"launchpad/api/internal/deployment"
 	"launchpad/api/internal/httpx"
 	"launchpad/api/internal/project"
 )
@@ -33,7 +35,7 @@ func main() {
 func run() error {
 	cfg := config.Load()
 
-	// ctx(context) is cancelled when the process receives Ctrl+C or SIGTERM.
+	// ctx is cancelled when the process receives Ctrl+C or SIGTERM.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -51,12 +53,31 @@ func run() error {
 	mux.HandleFunc("GET /api/health", func(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
-	project.NewHandler(project.NewPostgresStore(pool)).Register(mux)
+	projects := project.NewPostgresStore(pool)
+	project.NewHandler(projects).Register(mux)
+
+	// Deployments: builds that were running when the server last stopped can
+	// never finish, so mark them failed before accepting new ones.
+	deployments := deployment.NewPostgresStore(pool)
+	if n, err := deployments.FailUnfinished(ctx); err != nil {
+		return err
+	} else if n > 0 {
+		slog.Warn("marked interrupted deployments as failed", "count", n)
+	}
+	broker := deployment.NewBroker()
+	worker := deployment.NewWorker(deployments, projects, broker, deployment.ExecRunner{})
+	worker.Start(ctx, cfg.Workers) // background goroutines; they stop when ctx is cancelled
+	deployment.NewHandler(deployments, worker, broker).Register(mux)
 
 	srv := &http.Server{
 		Addr:              ":" + cfg.Port,
 		Handler:           withRecover(withLogging(mux)),
 		ReadHeaderTimeout: 10 * time.Second, // guards against slow-header (Slowloris) clients
+		// No WriteTimeout on purpose: it would cut off long-lived SSE log streams.
+
+		// Every request's context derives from ctx, so on Ctrl+C open SSE
+		// streams end at once instead of holding up the shutdown.
+		BaseContext: func(net.Listener) context.Context { return ctx },
 	}
 
 	// ListenAndServe blocks, so it runs in its own goroutine while this one
