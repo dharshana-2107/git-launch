@@ -33,7 +33,7 @@ func main() {
 func run() error {
 	cfg := config.Load()
 
-	// ctx is cancelled when the process receives Ctrl+C or SIGTERM.
+	// ctx(context) is cancelled when the process receives Ctrl+C or SIGTERM.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
