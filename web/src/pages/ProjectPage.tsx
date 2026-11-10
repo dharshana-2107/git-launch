@@ -73,7 +73,11 @@ export default function ProjectPage() {
           <dt>Branch</dt>
           <dd className="mono">{project.branch}</dd>
           <dt>URL</dt>
-          <dd className="mono">{appUrl(project.subdomain)}</dd>
+          <dd className="mono">
+            <a href={appUrl(project.subdomain)} target="_blank" rel="noreferrer">
+              {appUrl(project.subdomain)}
+            </a>
+          </dd>
           <dt>Environment variables</dt>
           <dd className="mono">
             {Object.keys(project.envVars ?? {}).length === 0
@@ -85,7 +89,7 @@ export default function ProjectPage() {
         </dl>
       )}
 
-      <Deployments projectId={project.id} />
+      <Deployments projectId={project.id} subdomain={project.subdomain} />
     </>
   );
 }

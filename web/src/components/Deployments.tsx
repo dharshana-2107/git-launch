@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
-import { api, ApiError, Deployment, isFinal } from "../api";
+import { api, ApiError, appUrl, Deployment, isFinal } from "../api";
 import BuildLogs from "./BuildLogs";
 
 // The Deployments section of a project page: Deploy button, history list,
 // and the live logs of the selected deployment.
-export default function Deployments({ projectId }: { projectId: number }) {
+export default function Deployments({ projectId, subdomain }: { projectId: number; subdomain: string }) {
   const [deployments, setDeployments] = useState<Deployment[]>([]);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [error, setError] = useState("");
@@ -43,6 +43,7 @@ export default function Deployments({ projectId }: { projectId: number }) {
   }
 
   const running = deployments.some((d) => !isFinal(d.status));
+  const live = deployments.find((d) => d.status === "live");
 
   return (
     <section className="card deployments">
@@ -53,6 +54,20 @@ export default function Deployments({ projectId }: { projectId: number }) {
         </button>
       </div>
       {error && <p className="error small">{error}</p>}
+
+      {live ? (
+        <p className="live-banner">
+          <span className="badge badge-live">live</span>
+          <a href={appUrl(subdomain)} target="_blank" rel="noreferrer" className="mono">
+            {appUrl(subdomain)}
+          </a>
+          <span className="muted small">
+            commit {live.commitSha} · {live.containerName}
+          </span>
+        </p>
+      ) : (
+        deployments.length > 0 && !running && <p className="muted small">Not live: no successful deployment yet.</p>
+      )}
 
       {deployments.length === 0 ? (
         <p className="muted small">No deployments yet. Click Deploy to build the latest commit.</p>

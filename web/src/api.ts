@@ -20,7 +20,14 @@ export type ProjectInput = {
   envVars: Record<string, string>;
 };
 
-export type DeploymentStatus = "queued" | "cloning" | "building" | "built" | "failed";
+export type DeploymentStatus =
+  | "queued"
+  | "cloning"
+  | "building"
+  | "deploying" // container started, health check running
+  | "live" // serving traffic
+  | "stopped" // replaced by a newer deployment
+  | "failed";
 
 export type Deployment = {
   id: number;
@@ -29,13 +36,15 @@ export type Deployment = {
   commitSha: string;
   commitMessage: string;
   imageTag: string;
+  containerName: string;
   error: string;
   createdAt: string;
   startedAt: string | null;
   finishedAt: string | null;
 };
 
-export const isFinal = (s: DeploymentStatus) => s === "built" || s === "failed";
+// The build/deploy process is over (nothing more will be logged).
+export const isFinal = (s: DeploymentStatus) => s === "live" || s === "stopped" || s === "failed";
 
 // ApiError carries the API's error message plus per-field messages
 // (from 422 validation and 409 conflict responses) so forms can show them.
@@ -83,5 +92,8 @@ export const api = {
 // URL of a deployment's live event stream (Server-Sent Events).
 export const deploymentEventsUrl = (id: number) => `/api/deployments/${id}/events`;
 
-// The address each app will be served at (Traefik routes it from phase 3).
-export const appUrl = (subdomain: string) => `http://${subdomain}.localhost`;
+// The address each app is served at. Vite reads VITE_* variables from the
+// environment or a web/.env file; both are optional.
+const appsDomain = import.meta.env.VITE_APPS_DOMAIN || "localhost";
+const appsPort = import.meta.env.VITE_APPS_PORT ? `:${import.meta.env.VITE_APPS_PORT}` : "";
+export const appUrl = (subdomain: string) => `http://${subdomain}.${appsDomain}${appsPort}`;

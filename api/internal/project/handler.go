@@ -1,6 +1,7 @@
 package project
 
 import (
+	"context"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -13,6 +14,11 @@ import (
 // responses. It holds no state of its own besides the Store.
 type Handler struct {
 	store Store
+
+	// OnDelete, if set, runs after a project is deleted. main.go uses it to
+	// stop the project's containers and remove its route. A hook keeps this
+	// package independent of the deployment package.
+	OnDelete func(ctx context.Context, projectID int64)
 }
 
 func NewHandler(store Store) *Handler {
@@ -91,6 +97,9 @@ func (h *Handler) delete(w http.ResponseWriter, r *http.Request) {
 	if err := h.store.Delete(r.Context(), id); err != nil {
 		h.storeError(w, err)
 		return
+	}
+	if h.OnDelete != nil {
+		h.OnDelete(r.Context(), id)
 	}
 	w.WriteHeader(http.StatusNoContent) // 204 = success, nothing to return
 }

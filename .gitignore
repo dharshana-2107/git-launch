@@ -10,3 +10,6 @@ web/dist/
 .vscode/
 .env
 web/*.tsbuildinfo
+
+# Generated at runtime (route files for Traefik)
+data/

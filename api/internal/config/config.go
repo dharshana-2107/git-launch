@@ -14,6 +14,9 @@ type Config struct {
 	Port        string // HTTP port the API listens on
 	DatabaseURL string // Postgres connection string
 	Workers     int    // how many builds may run at the same time
+	AppsDomain  string // apps are served at <subdomain>.<AppsDomain>
+	AppsNetwork string // Docker network shared by Traefik and the apps
+	RoutesDir   string // folder where route files for Traefik are written
 }
 
 func Load() Config {
@@ -21,6 +24,11 @@ func Load() Config {
 		Port:        getenv("PORT", "8080"),
 		DatabaseURL: getenv("DATABASE_URL", "postgres://launchpad:launchpad@localhost:5432/launchpad?sslmode=disable"),
 		Workers:     getenvInt("BUILD_WORKERS", 2),
+		AppsDomain:  getenv("APPS_DOMAIN", "localhost"),
+		AppsNetwork: getenv("APPS_NETWORK", "launchpad-apps"),
+		// Relative to where the API runs (the api/ folder), this is
+		// launchpad/data/routes, the folder docker-compose mounts into Traefik.
+		RoutesDir: getenv("ROUTES_DIR", "../data/routes"),
 	}
 }
 

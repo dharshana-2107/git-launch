@@ -29,17 +29,19 @@ type Worker struct {
 	projects     ProjectGetter
 	broker       *Broker
 	runner       Runner
+	runtime      *Runtime
 	queue        chan int64
 	buildTimeout time.Duration
 	maxLogLines  int
 }
 
-func NewWorker(deployments Store, projects ProjectGetter, broker *Broker, runner Runner) *Worker {
+func NewWorker(deployments Store, projects ProjectGetter, broker *Broker, runner Runner, runtime *Runtime) *Worker {
 	return &Worker{
 		deployments:  deployments,
 		projects:     projects,
 		broker:       broker,
 		runner:       runner,
+		runtime:      runtime,
 		queue:        make(chan int64, 100), // up to 100 waiting builds
 		buildTimeout: 15 * time.Minute,
 		maxLogLines:  5000, // stop storing lines after this, so one build cannot fill the database
@@ -114,7 +116,8 @@ func (b *build) fail(reason string) {
 	b.w.broker.Publish(b.id, Event{Type: "status", Status: StatusFailed, Error: reason})
 }
 
-// process runs one deployment: clone -> read commit -> check Dockerfile -> docker build.
+// process runs one deployment: clone -> read commit -> check Dockerfile ->
+// docker build -> release (run it and switch traffic to it).
 func (w *Worker) process(ctx context.Context, id int64) {
 	ctx, cancel := context.WithTimeout(ctx, w.buildTimeout)
 	defer cancel()
@@ -181,18 +184,77 @@ func (w *Worker) process(ctx context.Context, id int64) {
 
 	_ = w.deployments.SetImage(ctx, id, tag)
 	b.log("✓ Built " + tag)
-	if err := b.setStatus(StatusBuilt); err != nil {
-		slog.Error("set built", "deployment", id, "err", err)
+
+	w.release(b, p, tag)
+}
+
+// release runs the image and moves traffic to it with no downtime:
+//
+//  1. start the NEW container next to the old one (old keeps serving)
+//  2. wait until the new one answers HTTP (health check)
+//  3. switch the route to the new container (one atomic file rename)
+//  4. mark it live, wait a moment for Traefik to reload, remove the old one
+//
+// If step 1 or 2 fails, the new container is removed and the route is never
+// touched, so the previous version stays live.
+func (w *Worker) release(b *build, p project.Project, image string) {
+	ctx, rt := b.ctx, w.runtime
+	name := ContainerName(p, b.id)
+
+	if err := b.setStatus(StatusDeploying); err != nil {
+		b.fail("could not update status")
+		return
 	}
+
+	b.log(fmt.Sprintf("→ Starting container %s (port %d, %s memory, %s CPU)", name, AppPort(p), rt.Memory, rt.CPUs))
+	hostPort, err := rt.Start(ctx, p, b.id, image)
+	if err != nil {
+		b.log(err.Error())
+		rt.Remove(context.Background(), name)
+		b.fail(explain("could not start the container", err))
+		return
+	}
+	_ = w.deployments.SetContainer(ctx, b.id, name)
+
+	b.log(fmt.Sprintf("→ Waiting for the app to answer HTTP on port %d", AppPort(p)))
+	if err := rt.WaitHealthy(ctx, name, hostPort, b.log); err != nil {
+		rt.ContainerLogs(context.Background(), name, b.log)
+		rt.Remove(context.Background(), name)
+		b.fail(explain(fmt.Sprintf("%s: check the app listens on port %d (set the PORT env var to change it)", err, AppPort(p)), err))
+		return
+	}
+
+	if err := rt.Route(p, name); err != nil {
+		rt.Remove(context.Background(), name)
+		b.fail("could not update routing: " + err.Error())
+		return
+	}
+	b.log("→ Routing " + rt.AppURL(p) + " to " + name)
+
+	if err := w.deployments.MarkLive(ctx, p.ID, b.id); err != nil {
+		b.fail("could not mark the deployment live: " + err.Error())
+		return
+	}
+
+	// Give Traefik a moment to load the new route before the old container
+	// disappears, so requests in flight are not cut off.
+	select {
+	case <-time.After(rt.DrainDelay):
+	case <-ctx.Done():
+	}
+	rt.StopOthers(context.Background(), p.ID, name, b.log)
+
+	b.log("✓ Live at " + rt.AppURL(p))
+	b.w.broker.Publish(b.id, Event{Type: "status", Status: StatusLive})
 }
 
 // explain picks a clear message for timeouts and shutdowns.
 func explain(msg string, err error) string {
 	switch {
 	case errors.Is(err, context.DeadlineExceeded):
-		return "build timed out"
+		return "deployment timed out"
 	case errors.Is(err, context.Canceled):
-		return "build cancelled (server shutting down)"
+		return "deployment cancelled (server shutting down)"
 	}
 	return msg
 }

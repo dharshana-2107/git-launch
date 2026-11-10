@@ -17,7 +17,7 @@ func NewPostgresStore(db *sql.DB) *PostgresStore {
 	return &PostgresStore{db: db}
 }
 
-const columns = `id, project_id, status, commit_sha, commit_message, image_tag, error, created_at, started_at, finished_at`
+const columns = `id, project_id, status, commit_sha, commit_message, image_tag, container_name, error, created_at, started_at, finished_at`
 
 type scanner interface {
 	Scan(dest ...any) error
@@ -27,7 +27,7 @@ func scan(row scanner) (Deployment, error) {
 	var d Deployment
 	// StartedAt / FinishedAt are *time.Time: database/sql sets them to nil for NULL.
 	err := row.Scan(&d.ID, &d.ProjectID, &d.Status, &d.CommitSHA, &d.CommitMessage,
-		&d.ImageTag, &d.Error, &d.CreatedAt, &d.StartedAt, &d.FinishedAt)
+		&d.ImageTag, &d.ContainerName, &d.Error, &d.CreatedAt, &d.StartedAt, &d.FinishedAt)
 	return d, err
 }
 
@@ -85,7 +85,7 @@ func (s *PostgresStore) SetStatus(ctx context.Context, id int64, status Status) 
 		UPDATE deployments SET
 			status      = $2,
 			started_at  = CASE WHEN $2 <> 'queued' THEN COALESCE(started_at, now()) ELSE started_at END,
-			finished_at = CASE WHEN $2 IN ('built', 'failed') THEN now() ELSE finished_at END
+			finished_at = CASE WHEN $2 IN ('live', 'failed') THEN now() ELSE finished_at END
 		WHERE id = $1`, id, string(status))
 	return err
 }
@@ -99,6 +99,43 @@ func (s *PostgresStore) SetCommit(ctx context.Context, id int64, sha, message st
 func (s *PostgresStore) SetImage(ctx context.Context, id int64, tag string) error {
 	_, err := s.db.ExecContext(ctx, `UPDATE deployments SET image_tag = $2 WHERE id = $1`, id, tag)
 	return err
+}
+
+func (s *PostgresStore) SetContainer(ctx context.Context, id int64, name string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE deployments SET container_name = $2 WHERE id = $1`, id, name)
+	return err
+}
+
+// MarkLive swaps the live deployment in ONE transaction, so the project never
+// has two live deployments (the partial unique index would refuse it) and
+// never ends up with none because of a crash between the two updates.
+func (s *PostgresStore) MarkLive(ctx context.Context, projectID, id int64) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE deployments SET status = 'stopped'
+		WHERE project_id = $1 AND status = 'live' AND id <> $2`, projectID, id); err != nil {
+		return fmt.Errorf("stop previous live deployment: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE deployments SET status = 'live', finished_at = now()
+		WHERE id = $1`, id); err != nil {
+		return fmt.Errorf("mark live: %w", err)
+	}
+	return tx.Commit()
+}
+
+func (s *PostgresStore) LiveByProject(ctx context.Context, projectID int64) (Deployment, error) {
+	d, err := scan(s.db.QueryRowContext(ctx,
+		`SELECT `+columns+` FROM deployments WHERE project_id = $1 AND status = 'live'`, projectID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return Deployment{}, ErrNotFound
+	}
+	return d, err
 }
 
 func (s *PostgresStore) Fail(ctx context.Context, id int64, reason string) error {
@@ -140,8 +177,8 @@ func (s *PostgresStore) Logs(ctx context.Context, id int64, afterLine int) ([]Lo
 func (s *PostgresStore) FailUnfinished(ctx context.Context) (int64, error) {
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE deployments
-		SET status = 'failed', error = 'the server restarted during this build', finished_at = now()
-		WHERE status IN ('queued', 'cloning', 'building')`)
+		SET status = 'failed', error = 'the server restarted during this deployment', finished_at = now()
+		WHERE status IN ('queued', 'cloning', 'building', 'deploying')`)
 	if err != nil {
 		return 0, err
 	}

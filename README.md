@@ -1,8 +1,8 @@
-# GitLaunch
+# Launchpad
 
 A self-hosted mini Vercel/Render: point it at a GitHub repo with a Dockerfile and it builds the image, runs it, and serves it at `http://<subdomain>.localhost`, with live build logs, deployment history and one-click rollback.
 
-**Status: phase 2 of 5.** Projects (create, list, edit, delete) and deployments: a Deploy button that clones the repo and builds its Docker image in the background, with build logs streamed live to the browser (Server-Sent Events).
+**Status: phase 3 of 5.** Projects, deployments with live build logs (Server-Sent Events), and running apps: each deploy starts the new container, health-checks it, switches traffic to it through Traefik and removes the old one, with zero downtime. Apps are served at `http://<subdomain>.localhost`.
 
 | Part | Tech |
 | --- | --- |
@@ -10,6 +10,8 @@ A self-hosted mini Vercel/Render: point it at a GitHub repo with a Dockerfile an
 | Database | PostgreSQL 16 |
 | Dashboard | React 18 + TypeScript + Vite |
 | Builds | `git` + `docker build`, run by background worker goroutines |
+| Running apps | Docker containers with memory/CPU limits, health-checked before going live |
+| Routing | Traefik reverse proxy, route files written by the API |
 | Live logs | Server-Sent Events (`EventSource` in the browser) |
 | Local services | Docker Compose |
 
@@ -30,12 +32,14 @@ Check:
 go version && node -v && docker --version
 ```
 
-### 2. Start Postgres
+### 2. Start Postgres and Traefik
 
 ```bash
 docker compose up -d          # from the repo root
-docker compose ps             # postgres should say "healthy"
+docker compose ps             # postgres "healthy", traefik "Up"
 ```
+
+Traefik's dashboard (routes it knows about): http://localhost:8090
 
 ### 3. Start the API (terminal 1)
 
@@ -72,9 +76,16 @@ cd api && go test ./...
 1. Push `samples/hello-app` to its **own** public GitHub repo (see its README).
 2. In the dashboard: **New project** → that repo's URL, branch `main`, subdomain `hello`.
 3. On the project page click **Deploy** and watch the build logs stream.
-4. Check the image exists: `docker images launchpad/hello`.
+4. When it says **live**, open http://hello.localhost (use **Chrome or Firefox**; Safari may not resolve `*.localhost`).
+5. Change the `GREETING` env var on the project and deploy again: the page changes with no downtime.
 
-Phase 3 runs it at http://hello.localhost.
+Useful commands:
+
+```bash
+docker ps --filter label=launchpad.managed=true    # running apps
+cat data/routes/project-*.yml                      # the routing table Traefik reads
+curl -H "Host: hello.localhost" localhost          # works in any terminal
+```
 
 ## Try the API with curl
 
@@ -115,7 +126,8 @@ api/
   internal/db/                connection pool + migrations (SQL embedded in the binary)
   internal/httpx/             JSON helpers shared by all handlers
   internal/project/           model, validation, Postgres store, HTTP handlers, tests
-  internal/deployment/        build worker + queue, git/docker runner, live-log broker, SSE, tests
+  internal/deployment/        build worker + queue, git/docker runner, live-log broker, SSE,
+                              runtime (containers, health check, Traefik routes), tests
 web/
   src/api.ts                  every call to the API
   src/pages/                  Projects list, New project, Project details
@@ -125,7 +137,9 @@ web/
 samples/hello-app/            tiny Node app with a Dockerfile, to deploy
 docs/STUDY-PHASE-1.md         how each phase works + interview questions
 docs/STUDY-PHASE-2.md
-docker-compose.yml            Postgres
+docs/STUDY-PHASE-3.md
+docker-compose.yml            Postgres + Traefik
+data/routes/                  route files for Traefik (generated, not in git)
 ```
 
 ## Troubleshooting
@@ -140,4 +154,10 @@ docker-compose.yml            Postgres
 | Build fails at `git clone` | The repo must be public and the branch must exist (many older repos use `master`) |
 | Build fails with "no Dockerfile" | The Dockerfile must be in the repo's root folder |
 | Deployment stuck as failed "server restarted" | Expected: builds running when the API stopped are marked failed at start-up |
+| `docker compose up` says port 80 is in use | Something else uses port 80. Change `"80:80"` to `"8000:80"` in `docker-compose.yml`, create `web/.env` with `VITE_APPS_PORT=8000`, and open apps at `http://hello.localhost:8000` |
+| Deploy fails: `network launchpad-apps not found` | Run `docker compose up -d` (it creates the network) |
+| Deploy fails: "app did not become healthy" | The app must listen on the `PORT` env var (default 3000). The build log shows the app's last output |
+| `hello.localhost` does not open in Safari | Use Chrome or Firefox, or `curl -H "Host: hello.localhost" localhost` |
+| `hello.localhost` shows 404 after a successful deploy | Traefik did not pick up the route file: `docker compose restart traefik` |
+| The API must run from the `api/` folder | It writes route files to `../data/routes`, the folder Traefik reads. Set `ROUTES_DIR` to run it elsewhere |
 | Start from an empty database | `docker compose down -v` (deletes all data) |

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -81,6 +82,36 @@ func (m *memStore) SetCommit(ctx context.Context, id int64, sha, msg string) err
 func (m *memStore) SetImage(ctx context.Context, id int64, tag string) error {
 	return m.update(id, func(d *Deployment) { d.ImageTag = tag })
 }
+func (m *memStore) SetContainer(ctx context.Context, id int64, name string) error {
+	return m.update(id, func(d *Deployment) { d.ContainerName = name })
+}
+
+func (m *memStore) MarkLive(ctx context.Context, projectID, id int64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for k, d := range m.deps {
+		if d.ProjectID == projectID && d.Status == StatusLive && k != id {
+			d.Status = StatusStopped
+			m.deps[k] = d
+		}
+	}
+	d := m.deps[id]
+	d.Status = StatusLive
+	m.deps[id] = d
+	return nil
+}
+
+func (m *memStore) LiveByProject(ctx context.Context, projectID int64) (Deployment, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, d := range m.deps {
+		if d.ProjectID == projectID && d.Status == StatusLive {
+			return d, nil
+		}
+	}
+	return Deployment{}, ErrNotFound
+}
+
 func (m *memStore) Fail(ctx context.Context, id int64, reason string) error {
 	return m.update(id, func(d *Deployment) { d.Status, d.Error = StatusFailed, reason })
 }
@@ -123,14 +154,26 @@ func (f fakeProjects) Get(ctx context.Context, id int64) (project.Project, error
 // fakeRunner pretends to be git and docker. Each field switches on one
 // failure, so a test can walk down every path of the worker.
 type fakeRunner struct {
-	noDockerfile bool // the "cloned" repo has no Dockerfile
-	cloneFails   bool
-	buildFails   bool
+	noDockerfile bool   // the "cloned" repo has no Dockerfile
+	cloneFails   bool   // git clone fails
+	buildFails   bool   // docker build fails
+	appPort      string // what "docker port" reports: a test HTTP server's port
+	appCrashes   bool   // "docker inspect" reports the container exited
+
+	mu       sync.Mutex
+	commands []string // every docker command run, for assertions
+	running  []string // container names "docker ps" reports
 }
 
-func (f fakeRunner) Run(ctx context.Context, dir string, onLine func(string), name string, args ...string) error {
-	switch name {
-	case "git": // clone
+func (f *fakeRunner) record(args []string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.commands = append(f.commands, strings.Join(args, " "))
+}
+
+func (f *fakeRunner) Run(ctx context.Context, dir string, onLine func(string), name string, args ...string) error {
+	switch {
+	case name == "git": // clone
 		if f.cloneFails {
 			onLine("fatal: repository not found")
 			return errors.New("exit status 128")
@@ -140,7 +183,8 @@ func (f fakeRunner) Run(ctx context.Context, dir string, onLine func(string), na
 			return os.WriteFile(filepath.Join(dir, "Dockerfile"), []byte("FROM scratch\n"), 0o644)
 		}
 		return nil
-	case "docker": // build
+	case name == "docker" && args[0] == "build":
+		f.record(args)
 		onLine("#1 [internal] load build definition from Dockerfile")
 		if f.buildFails {
 			onLine("ERROR: failed to solve")
@@ -148,13 +192,52 @@ func (f fakeRunner) Run(ctx context.Context, dir string, onLine func(string), na
 		}
 		onLine("#5 naming to docker.io/launchpad/demo:abc1234 done")
 		return nil
+	case name == "docker" && args[0] == "logs":
+		onLine("Error: Cannot find module '/app/server.js'")
+		return nil
 	}
 	return errors.New("unexpected command " + name)
 }
 
-func (f fakeRunner) Output(ctx context.Context, dir string, name string, args ...string) (string, error) {
-	if len(args) > 0 && args[0] == "rev-parse" {
-		return "abc1234", nil
+func (f *fakeRunner) Output(ctx context.Context, dir string, name string, args ...string) (string, error) {
+	if name == "git" {
+		if args[0] == "rev-parse" {
+			return "abc1234", nil
+		}
+		return "Initial commit", nil
 	}
-	return "Initial commit", nil
+	f.record(args)
+	switch args[0] {
+	case "run":
+		f.mu.Lock()
+		f.running = append(f.running, args[3]) // args: run --detach --name <name> ...
+		f.mu.Unlock()
+		return "3f2a9c1e5b7d", nil
+	case "port":
+		if f.appCrashes {
+			return "127.0.0.1:1", nil // nothing listens there: the app never answers
+		}
+		return "127.0.0.1:" + f.appPort, nil
+	case "inspect":
+		if f.appCrashes {
+			return "false 0", nil
+		}
+		return "true 0", nil
+	case "ps":
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		return strings.Join(f.running, "\n"), nil
+	case "rm":
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		kept := f.running[:0]
+		for _, n := range f.running {
+			if n != args[len(args)-1] {
+				kept = append(kept, n)
+			}
+		}
+		f.running = kept
+		return "", nil
+	}
+	return "", errors.New("unexpected docker command " + args[0])
 }

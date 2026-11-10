@@ -10,21 +10,24 @@ import (
 
 // Status is where a deployment is in its lifecycle:
 //
-//	queued -> cloning -> building -> built
-//	   \_________\__________\-----> failed
+//	queued -> cloning -> building -> deploying -> live -> stopped (replaced by a newer one)
+//	   \_________\__________\___________\-----> failed
 type Status string
 
 const (
-	StatusQueued   Status = "queued"
-	StatusCloning  Status = "cloning"
-	StatusBuilding Status = "building"
-	StatusBuilt    Status = "built"
-	StatusFailed   Status = "failed"
+	StatusQueued    Status = "queued"
+	StatusCloning   Status = "cloning"
+	StatusBuilding  Status = "building"
+	StatusDeploying Status = "deploying" // container started, waiting for it to be healthy
+	StatusLive      Status = "live"      // serving traffic
+	StatusStopped   Status = "stopped"   // was live, replaced by a newer deployment
+	StatusFailed    Status = "failed"
 )
 
-// Final reports whether the deployment has stopped changing.
+// Final reports whether the build/deploy process is over. ("live" can still
+// become "stopped" later, but nothing more happens to it in this run.)
 func (s Status) Final() bool {
-	return s == StatusBuilt || s == StatusFailed
+	return s == StatusLive || s == StatusStopped || s == StatusFailed
 }
 
 type Deployment struct {
@@ -34,6 +37,7 @@ type Deployment struct {
 	CommitSHA     string     `json:"commitSha"`
 	CommitMessage string     `json:"commitMessage"`
 	ImageTag      string     `json:"imageTag"`
+	ContainerName string     `json:"containerName"`
 	Error         string     `json:"error"`
 	CreatedAt     time.Time  `json:"createdAt"`
 	StartedAt     *time.Time `json:"startedAt"`  // pointer: null until it starts
@@ -63,6 +67,12 @@ type Store interface {
 	SetStatus(ctx context.Context, id int64, status Status) error
 	SetCommit(ctx context.Context, id int64, sha, message string) error
 	SetImage(ctx context.Context, id int64, tag string) error
+	SetContainer(ctx context.Context, id int64, name string) error
+	// MarkLive makes this deployment the project's live one, and its previous
+	// live deployment (if any) "stopped", in one transaction.
+	MarkLive(ctx context.Context, projectID, id int64) error
+	// LiveByProject returns the project's live deployment, or ErrNotFound.
+	LiveByProject(ctx context.Context, projectID int64) (Deployment, error)
 	Fail(ctx context.Context, id int64, reason string) error
 
 	AppendLog(ctx context.Context, id int64, line int, text string) error

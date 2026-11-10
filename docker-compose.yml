@@ -1,5 +1,4 @@
-# Local services the platform depends on. Phase 1 needs only Postgres;
-# Traefik (subdomain routing) is added in phase 3.
+# Local services the platform depends on.
 services:
   postgres:
     image: postgres:16-alpine
@@ -16,6 +15,32 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+
+  # Traefik: the reverse proxy in front of every deployed app.
+  # It reads one route file per project from ./data/routes (written by the
+  # API) and forwards http://<subdomain>.localhost to that project's container.
+  traefik:
+    image: traefik:v3.1
+    command:
+      - --entrypoints.web.address=:80
+      - --providers.file.directory=/routes
+      - --providers.file.watch=true    # reload as soon as a route file changes
+      - --api.dashboard=true
+      - --api.insecure=true            # dashboard on :8090 without login: local only
+    ports:
+      - "80:80"        # the apps:            http://<subdomain>.localhost
+      - "8090:8080"    # Traefik's dashboard:  http://localhost:8090
+    volumes:
+      - ./data/routes:/routes:ro       # read-only: Traefik never writes routes
+    networks:
+      - apps
+    # No Docker socket mounted: Traefik cannot control Docker, it only routes.
+
+networks:
+  # Every app container joins this network, so Traefik reaches them by name
+  # (e.g. http://lp-hello-42:3000). The API passes --network launchpad-apps.
+  apps:
+    name: launchpad-apps
 
 volumes:
   pgdata:

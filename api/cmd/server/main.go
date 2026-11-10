@@ -8,11 +8,13 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -54,7 +56,8 @@ func run() error {
 		httpx.WriteJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
 	projects := project.NewPostgresStore(pool)
-	project.NewHandler(projects).Register(mux)
+	projectHandler := project.NewHandler(projects)
+	projectHandler.Register(mux)
 
 	// Deployments: builds that were running when the server last stopped can
 	// never finish, so mark them failed before accepting new ones.
@@ -64,8 +67,29 @@ func run() error {
 	} else if n > 0 {
 		slog.Warn("marked interrupted deployments as failed", "count", n)
 	}
+
+	routesDir, err := filepath.Abs(cfg.RoutesDir)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(routesDir, 0o755); err != nil {
+		return fmt.Errorf("create routes folder: %w", err)
+	}
+	runner := deployment.ExecRunner{}
+	apps := deployment.NewRuntime(runner, cfg.AppsNetwork, routesDir, cfg.AppsDomain)
+	slog.Info("apps", "url", "http://<subdomain>."+cfg.AppsDomain, "routes", routesDir)
+
+	// Remove containers left over from deployments that never went live.
+	if n := apps.Reconcile(ctx, deployments); n > 0 {
+		slog.Warn("removed leftover containers", "count", n)
+	}
+	// Deleting a project also stops its containers and removes its route.
+	projectHandler.OnDelete = func(ctx context.Context, projectID int64) {
+		apps.RemoveProject(ctx, projectID)
+	}
+
 	broker := deployment.NewBroker()
-	worker := deployment.NewWorker(deployments, projects, broker, deployment.ExecRunner{})
+	worker := deployment.NewWorker(deployments, projects, broker, runner, apps)
 	worker.Start(ctx, cfg.Workers) // background goroutines; they stop when ctx is cancelled
 	deployment.NewHandler(deployments, worker, broker).Register(mux)
 

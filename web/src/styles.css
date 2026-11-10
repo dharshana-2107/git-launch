@@ -90,10 +90,15 @@ input {
 .commit-msg { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .badge { font-size: 12px; font-weight: 600; padding: 2px 8px; border-radius: 999px; text-align: center; }
-.badge-queued, .badge-cloning, .badge-building { background: #fef3c7; color: #92400e; }
-.badge-built { background: #dcfce7; color: #166534; }
+.badge-queued, .badge-cloning, .badge-building, .badge-deploying { background: #fef3c7; color: #92400e; }
+.badge-live { background: #dcfce7; color: #166534; }
+.badge-stopped { background: #e5e7eb; color: #4b5563; }
 .badge-failed { background: #fee2e2; color: #991b1b; }
 
+.live-banner {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 0;
+  padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px;
+}
 .logs-wrap { border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
 .logs-head { display: flex; justify-content: space-between; padding: 6px 12px; border-bottom: 1px solid #23272f; background: #161a20; color: #9aa3ae; }
 .logs {
