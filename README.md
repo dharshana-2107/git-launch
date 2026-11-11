@@ -1,6 +1,9 @@
-# Launchpad
+# GitLaunch
 
 A self-hosted deployment platform which points at a GitHub repo with a **Dockerfile**, and every `git push` builds the image, health-checks it and switches traffic to it at `http://<subdomain>.localhost`, with zero downtime, live build logs and one-click rollback.
+
+![GitLaunch main page](main.png)
+![Project page](proj.png)
 
 
 **Features**
@@ -15,27 +18,7 @@ A self-hosted deployment platform which points at a GitHub repo with a **Dockerf
 
 ## Architecture
 
-```mermaid
-flowchart LR
-    dev([Developer]) -- git push --> gh[GitHub]
-    gh -- "webhook (HMAC signed)" --> tunnel[Cloudflare tunnel]
-    tunnel --> api
-
-    subgraph mac [Your machine]
-        web[React dashboard<br/>:5173] -- "REST + SSE" --> api[Go API<br/>:8080]
-        api --- pg[(PostgreSQL)]
-        api -- "job queue (channel)" --> worker[Build workers<br/>goroutines]
-        worker -- "git clone<br/>docker build / run" --> docker[Docker]
-        worker -- "writes route file" --> routes[/data/routes/*.yml/]
-        routes -. watched by .-> traefik[Traefik<br/>:80]
-        subgraph net [Docker network: launchpad-apps]
-            traefik --> app1[lp-hello-42]
-            traefik --> app2[lp-blog-17]
-        end
-    end
-
-    user([Visitor]) -- "http://hello.localhost" --> traefik
-```
+![Architecture Diagram](architecturediagram.png)
 
 **A deploy, step by step**
 
