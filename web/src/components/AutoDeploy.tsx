@@ -17,7 +17,7 @@ export default function AutoDeploy({ repoUrl, branch }: { repoUrl: string; branc
   }, []);
 
   return (
-    <section className="card deployments">
+    <section className="panel">
       <h2>Deploy on git push</h2>
       {enabled === false ? (
         <p className="muted small">

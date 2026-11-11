@@ -64,8 +64,8 @@ export default function BuildLogs({ deploymentId, onStatus }: Props) {
   return (
     <div className="logs-wrap">
       <div className="logs-head small muted">
-        <span>Build logs</span>
-        <span className={connected ? "live-dot" : ""}>{connected ? "● live" : `${lines.length} ${lines.length === 1 ? "line" : "lines"}`}</span>
+        <span>Build output</span>
+        <span className={connected ? "live-dot" : ""}>{connected ? "● Streaming" : `${lines.length} ${lines.length === 1 ? "line" : "lines"}`}</span>
       </div>
       <pre className="logs" ref={boxRef}>
         {lines.length === 0 && <span className="muted">Waiting for output…</span>}

@@ -17,7 +17,7 @@ export default function AppLogs({ projectId, refreshKey }: { projectId: number; 
       setMessage(res.lines.length === 0 ? "The app has not printed anything yet." : "");
     } catch (e) {
       setLines([]);
-      setMessage(e instanceof ApiError && e.status === 404 ? "Not running: deploy the project first." : String(e));
+      setMessage(e instanceof ApiError && e.status === 404 ? "The app is not running. Deploy it to see its output here." : String(e));
     }
   }, [projectId]);
 
@@ -34,12 +34,12 @@ export default function AppLogs({ projectId, refreshKey }: { projectId: number; 
   }, [follow, load]);
 
   return (
-    <section className="card deployments">
-      <div className="page-head">
+    <section className="panel">
+      <div className="panel-head">
         <h2>App logs</h2>
         <div className="actions">
           <label className="small muted follow">
-            <input type="checkbox" checked={follow} onChange={(e) => setFollow(e.target.checked)} /> auto-refresh
+            <input type="checkbox" checked={follow} onChange={(e) => setFollow(e.target.checked)} /> Auto-refresh
           </label>
           <button className="button" onClick={load}>
             Refresh

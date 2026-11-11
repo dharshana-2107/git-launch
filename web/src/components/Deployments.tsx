@@ -1,17 +1,18 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, ApiError, appUrl, Deployment, isFinal } from "../api";
+import { api, ApiError, Deployment, isFinal } from "../api";
 import BuildLogs from "./BuildLogs";
+import StatusPill from "./StatusPill";
+import { duration, relativeTime } from "../lib/time";
 
 // The Deployments section of a project page: Deploy button, history list,
 // and the live logs of the selected deployment.
 type Props = {
   projectId: number;
-  subdomain: string;
   refreshKey: number; // bump to force a reload (e.g. after a config change)
   onLiveChange?: (live: Deployment | undefined) => void;
 };
 
-export default function Deployments({ projectId, subdomain, refreshKey, onLiveChange }: Props) {
+export default function Deployments({ projectId, refreshKey, onLiveChange }: Props) {
   const [deployments, setDeployments] = useState<Deployment[]>([]);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [error, setError] = useState("");
@@ -79,8 +80,8 @@ export default function Deployments({ projectId, subdomain, refreshKey, onLiveCh
   }
 
   return (
-    <section className="card deployments">
-      <div className="page-head">
+    <section className="panel">
+      <div className="panel-head">
         <h2>Deployments</h2>
         <button className="button primary" onClick={deploy} disabled={starting || running}>
           {running ? "Deploying…" : "Deploy"}
@@ -88,22 +89,8 @@ export default function Deployments({ projectId, subdomain, refreshKey, onLiveCh
       </div>
       {error && <p className="error small">{error}</p>}
 
-      {live ? (
-        <p className="live-banner">
-          <span className="badge badge-live">live</span>
-          <a href={appUrl(subdomain)} target="_blank" rel="noreferrer" className="mono">
-            {appUrl(subdomain)}
-          </a>
-          <span className="muted small">
-            commit {live.commitSha} · {live.containerName}
-          </span>
-        </p>
-      ) : (
-        deployments.length > 0 && !running && <p className="muted small">Not live: no successful deployment yet.</p>
-      )}
-
       {deployments.length === 0 ? (
-        <p className="muted small">No deployments yet. Click Deploy to build the latest commit.</p>
+        <p className="muted small">No deployments yet. Deploy to build the latest commit.</p>
       ) : (
         <ul className="deploy-list">
           {deployments.map((d) => (
@@ -111,12 +98,17 @@ export default function Deployments({ projectId, subdomain, refreshKey, onLiveCh
               key={d.id}
               className={d.id === selectedId ? "selected" : ""}
               onClick={() => setSelectedId(d.id)}
+              tabIndex={0}
+              onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && setSelectedId(d.id)}
+              aria-selected={d.id === selectedId}
             >
-              <StatusBadge status={d.status} />
-              <span className="mono">{d.commitSha || "…"}</span>
-              <span className="commit-msg">
-                <span className={`trigger trigger-${d.trigger}`}>{triggerLabel(d)}</span>
-                {d.error || d.commitMessage}
+              <StatusPill status={d.status} />
+              <span className="deploy-what">
+                <span className="deploy-msg">{d.error || d.commitMessage || "Waiting for the commit…"}</span>
+                <span className="deploy-sub">
+                  <code>{d.commitSha || "-------"}</code>
+                  <span className={`trigger trigger-${d.trigger}`}>{triggerLabel(d)}</span>
+                </span>
               </span>
               <span className="row-end">
                 {d.status === "stopped" && d.imagePruned && <span className="muted small">image deleted</span>}
@@ -131,7 +123,10 @@ export default function Deployments({ projectId, subdomain, refreshKey, onLiveCh
                     Roll back
                   </button>
                 )}
-                <span className="muted small">{timing(d)}</span>
+                <span className="deploy-time">
+                  <span>{relativeTime(d.createdAt)}</span>
+                  <span className="muted">{duration(d.startedAt, d.finishedAt)}</span>
+                </span>
               </span>
             </li>
           ))}
@@ -144,28 +139,15 @@ export default function Deployments({ projectId, subdomain, refreshKey, onLiveCh
   );
 }
 
-export function StatusBadge({ status }: { status: Deployment["status"] }) {
-  return <span className={`badge badge-${status}`}>{status}</span>;
-}
-
 function triggerLabel(d: Deployment) {
   switch (d.trigger) {
     case "push":
       return "git push";
     case "rollback":
-      return `rollback of #${d.sourceDeploymentId ?? "?"}`;
+      return `rollback to #${d.sourceDeploymentId ?? "?"}`;
     case "config":
       return "env change";
     default:
       return "manual";
   }
-}
-
-// "2m 14s" once finished, otherwise how long ago it was created.
-function timing(d: Deployment) {
-  if (d.startedAt && d.finishedAt) {
-    const secs = Math.round((Date.parse(d.finishedAt) - Date.parse(d.startedAt)) / 1000);
-    return secs >= 60 ? `${Math.floor(secs / 60)}m ${secs % 60}s` : `${secs}s`;
-  }
-  return new Date(d.createdAt).toLocaleTimeString();
 }
