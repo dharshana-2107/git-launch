@@ -1,8 +1,10 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { api, appUrl, Project } from "../api";
+import { api, appUrl, Deployment, Project } from "../api";
 import ProjectForm from "../components/ProjectForm";
 import Deployments from "../components/Deployments";
+import AppLogs from "../components/AppLogs";
+import AutoDeploy from "../components/AutoDeploy";
 
 // One project: its details, an edit form and delete.
 // The Deployments section below holds the Deploy button and live build logs.
@@ -12,6 +14,9 @@ export default function ProjectPage() {
   const [project, setProject] = useState<Project | null>(null);
   const [error, setError] = useState("");
   const [editing, setEditing] = useState(false);
+  const [live, setLive] = useState<Deployment | undefined>();
+  const [refreshKey, setRefreshKey] = useState(0); // bump = reload deployments + app logs
+  const [notice, setNotice] = useState("");
 
   // Re-runs whenever id changes (e.g. navigating from one project to another).
   useEffect(() => {
@@ -58,8 +63,22 @@ export default function ProjectPage() {
           }}
           submitLabel="Save changes"
           onSubmit={async (input) => {
-            setProject(await api.updateProject(project.id, input));
+            const before = JSON.stringify(project.envVars ?? {});
+            const updated = await api.updateProject(project.id, input);
+            setProject(updated);
             setEditing(false);
+
+            // Env vars only reach the app when its container restarts, so
+            // restart the live image with them (no rebuild needed).
+            if (live && JSON.stringify(updated.envVars ?? {}) !== before) {
+              try {
+                await api.redeploy(live.id);
+                setNotice("Environment variables changed: restarting the app with them (no rebuild).");
+              } catch (e) {
+                setNotice(`Saved. Redeploy to apply the new environment variables (${e instanceof Error ? e.message : e}).`);
+              }
+              setRefreshKey((k) => k + 1);
+            }
           }}
         />
       ) : (
@@ -89,7 +108,15 @@ export default function ProjectPage() {
         </dl>
       )}
 
-      <Deployments projectId={project.id} subdomain={project.subdomain} />
+      {notice && <p className="notice small">{notice}</p>}
+      <Deployments
+        projectId={project.id}
+        subdomain={project.subdomain}
+        refreshKey={refreshKey}
+        onLiveChange={setLive}
+      />
+      <AppLogs projectId={project.id} refreshKey={live?.id ?? 0} />
+      <AutoDeploy repoUrl={project.repoUrl} branch={project.branch} />
     </>
   );
 }

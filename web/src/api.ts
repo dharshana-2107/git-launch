@@ -37,6 +37,8 @@ export type Deployment = {
   commitMessage: string;
   imageTag: string;
   containerName: string;
+  trigger: "manual" | "push" | "rollback" | "config";
+  sourceDeploymentId: number | null; // rollback/config: whose image was reused
   error: string;
   createdAt: string;
   startedAt: string | null;
@@ -87,6 +89,13 @@ export const api = {
     request<Deployment>(`/api/projects/${projectId}/deployments`, { method: "POST" }),
   listDeployments: (projectId: number) => request<Deployment[]>(`/api/projects/${projectId}/deployments`),
   getDeployment: (id: number) => request<Deployment>(`/api/deployments/${id}`),
+  // Run an earlier deployment's image again (rollback), or the live one with
+  // the current env vars (config restart). No rebuild.
+  redeploy: (deploymentId: number) =>
+    request<Deployment>(`/api/deployments/${deploymentId}/redeploy`, { method: "POST" }),
+  appLogs: (projectId: number, tail = 200) =>
+    request<{ container: string; lines: string[] }>(`/api/projects/${projectId}/app-logs?tail=${tail}`),
+  config: () => request<{ webhooksEnabled: boolean; webhookPath: string }>("/api/config"),
 };
 
 // URL of a deployment's live event stream (Server-Sent Events).

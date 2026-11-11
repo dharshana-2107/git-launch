@@ -17,7 +17,7 @@ func NewPostgresStore(db *sql.DB) *PostgresStore {
 	return &PostgresStore{db: db}
 }
 
-const columns = `id, project_id, status, commit_sha, commit_message, image_tag, container_name, error, created_at, started_at, finished_at`
+const columns = `id, project_id, status, commit_sha, commit_message, image_tag, container_name, trigger, source_deployment_id, error, created_at, started_at, finished_at`
 
 type scanner interface {
 	Scan(dest ...any) error
@@ -27,15 +27,32 @@ func scan(row scanner) (Deployment, error) {
 	var d Deployment
 	// StartedAt / FinishedAt are *time.Time: database/sql sets them to nil for NULL.
 	err := row.Scan(&d.ID, &d.ProjectID, &d.Status, &d.CommitSHA, &d.CommitMessage,
-		&d.ImageTag, &d.ContainerName, &d.Error, &d.CreatedAt, &d.StartedAt, &d.FinishedAt)
+		&d.ImageTag, &d.ContainerName, &d.Trigger, &d.SourceID, &d.Error, &d.CreatedAt, &d.StartedAt, &d.FinishedAt)
 	return d, err
 }
 
 // Create inserts a queued deployment. The database itself refuses a second
 // active deployment (partial unique index) or a missing project (foreign key).
-func (s *PostgresStore) Create(ctx context.Context, projectID int64) (Deployment, error) {
-	d, err := scan(s.db.QueryRowContext(ctx,
-		`INSERT INTO deployments (project_id) VALUES ($1) RETURNING `+columns, projectID))
+//
+// With nd.Source set (rollback/config), the image and commit are copied from
+// it, so the worker can skip cloning and building.
+func (s *PostgresStore) Create(ctx context.Context, nd NewDeployment) (Deployment, error) {
+	trigger := nd.Trigger
+	if trigger == "" {
+		trigger = TriggerManual
+	}
+	var sourceID *int64
+	var image, sha, message string
+	if nd.Source != nil {
+		sourceID = &nd.Source.ID
+		image, sha, message = nd.Source.ImageTag, nd.Source.CommitSHA, nd.Source.CommitMessage
+	}
+
+	d, err := scan(s.db.QueryRowContext(ctx, `
+		INSERT INTO deployments (project_id, trigger, source_deployment_id, image_tag, commit_sha, commit_message)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		RETURNING `+columns,
+		nd.ProjectID, string(trigger), sourceID, image, sha, message))
 	switch db.SQLState(err) {
 	case db.CodeUniqueViolation:
 		return Deployment{}, ErrAlreadyActive

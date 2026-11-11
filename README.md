@@ -2,7 +2,7 @@
 
 A self-hosted mini Vercel/Render: point it at a GitHub repo with a Dockerfile and it builds the image, runs it, and serves it at `http://<subdomain>.localhost`, with live build logs, deployment history and one-click rollback.
 
-**Status: phase 3 of 5.** Projects, deployments with live build logs (Server-Sent Events), and running apps: each deploy starts the new container, health-checks it, switches traffic to it through Traefik and removes the old one, with zero downtime. Apps are served at `http://<subdomain>.localhost`.
+**Status: phase 4 of 5.** Projects; deployments with live build logs (Server-Sent Events); apps served at `http://<subdomain>.localhost` behind Traefik with health-checked, zero-downtime switch-overs; deploy on `git push` (signed GitHub webhooks); one-click rollback and env-var restarts without rebuilding; app runtime logs.
 
 | Part | Tech |
 | --- | --- |
@@ -12,6 +12,7 @@ A self-hosted mini Vercel/Render: point it at a GitHub repo with a Dockerfile an
 | Builds | `git` + `docker build`, run by background worker goroutines |
 | Running apps | Docker containers with memory/CPU limits, health-checked before going live |
 | Routing | Traefik reverse proxy, route files written by the API |
+| Deploy on push | GitHub webhooks (HMAC-SHA256 verified) through a Cloudflare tunnel |
 | Live logs | Server-Sent Events (`EventSource` in the browser) |
 | Local services | Docker Compose |
 
@@ -87,6 +88,26 @@ cat data/routes/project-*.yml                      # the routing table Traefik r
 curl -H "Host: hello.localhost" localhost          # works in any terminal
 ```
 
+## Deploy on git push (optional)
+
+GitHub must be able to reach your Mac, so this uses a free Cloudflare tunnel.
+
+1. Install it once: `brew install cloudflared`
+2. Pick a secret (any long random text), e.g. `openssl rand -hex 20`, and start the API with it:
+   ```bash
+   cd api
+   WEBHOOK_SECRET=<your secret> go run ./cmd/server
+   ```
+3. In a third terminal: `cloudflared tunnel --url http://localhost:8080`. It prints an address like `https://random-words.trycloudflare.com`.
+4. On GitHub, open your hello-app repo → **Settings → Webhooks → Add webhook**:
+   - Payload URL: `https://random-words.trycloudflare.com/api/webhooks/github`
+   - Content type: `application/json`
+   - Secret: the same secret as step 2
+   - Events: **Just the push event**
+5. GitHub sends a "ping"; the webhook should show a green tick. Now push a change to hello-app: a deployment starts by itself.
+
+The tunnel address changes every time you restart `cloudflared`; update the webhook URL when it does. Only `/api/webhooks/github` is reachable through the tunnel: every other path answers 403.
+
 ## Try the API with curl
 
 ```bash
@@ -100,6 +121,8 @@ curl -X DELETE localhost:8080/api/projects/1
 
 curl -X POST localhost:8080/api/projects/1/deployments      # start a build (202)
 curl -N localhost:8080/api/deployments/1/events             # watch it live (-N = no buffering)
+curl -X POST localhost:8080/api/deployments/1/redeploy      # rollback (older) or restart (live), no rebuild
+curl localhost:8080/api/projects/1/app-logs                 # what the running app printed
 ```
 
 ## API
@@ -116,6 +139,10 @@ curl -N localhost:8080/api/deployments/1/events             # watch it live (-N 
 | GET | `/api/projects/{id}/deployments` | 200 latest 20 | |
 | GET | `/api/deployments/{id}` | 200 deployment | 404 |
 | GET | `/api/deployments/{id}/events` | SSE stream: `log`, `status`, `done` events | 404 |
+| POST | `/api/deployments/{id}/redeploy` | 202: rollback (stopped deployment) or config restart (live deployment) | 404, 409 failed/no image or one already running |
+| GET | `/api/projects/{id}/app-logs?tail=200` | 200 `{container, lines}` | 404 not live, 502 container unreachable |
+| POST | `/api/webhooks/github` | 202 deployments queued/deferred; 200 to `ping` | 401 bad signature, 503 `WEBHOOK_SECRET` not set |
+| GET | `/api/config` | 200 `{webhooksEnabled, webhookPath}` | |
 
 ## Project layout
 
@@ -127,17 +154,21 @@ api/
   internal/httpx/             JSON helpers shared by all handlers
   internal/project/           model, validation, Postgres store, HTTP handlers, tests
   internal/deployment/        build worker + queue, git/docker runner, live-log broker, SSE,
-                              runtime (containers, health check, Traefik routes), tests
+                              runtime (containers, health check, Traefik routes),
+                              GitHub webhook, rollback/redeploy, tests
 web/
   src/api.ts                  every call to the API
   src/pages/                  Projects list, New project, Project details
   src/components/ProjectForm  shared create/edit form
   src/components/Deployments  Deploy button + deployment history
   src/components/BuildLogs    live log viewer (EventSource)
+  src/components/AppLogs      running app's output
+  src/components/AutoDeploy   deploy-on-push setup steps
 samples/hello-app/            tiny Node app with a Dockerfile, to deploy
 docs/STUDY-PHASE-1.md         how each phase works + interview questions
 docs/STUDY-PHASE-2.md
 docs/STUDY-PHASE-3.md
+docs/STUDY-PHASE-4.md
 docker-compose.yml            Postgres + Traefik
 data/routes/                  route files for Traefik (generated, not in git)
 ```
@@ -160,4 +191,9 @@ data/routes/                  route files for Traefik (generated, not in git)
 | `hello.localhost` does not open in Safari | Use Chrome or Firefox, or `curl -H "Host: hello.localhost" localhost` |
 | `hello.localhost` shows 404 after a successful deploy | Traefik did not pick up the route file: `docker compose restart traefik` |
 | The API must run from the `api/` folder | It writes route files to `../data/routes`, the folder Traefik reads. Set `ROUTES_DIR` to run it elsewhere |
+| GitHub webhook shows a red cross, "401 invalid signature" | The secret in GitHub and `WEBHOOK_SECRET` must match exactly; content type must be `application/json` |
+| GitHub webhook shows "503" | Restart the API with `WEBHOOK_SECRET=...` |
+| GitHub webhook times out | `cloudflared` stopped or its address changed: restart it and update the Payload URL |
+| Push arrives but nothing deploys | The project's repo URL and branch must match the pushed repo and branch |
+| "Roll back" fails: image no longer exists | The image was deleted (`docker image prune`); deploy that commit again instead |
 | Start from an empty database | `docker compose down -v` (deletes all data) |

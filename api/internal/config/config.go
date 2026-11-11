@@ -17,6 +17,10 @@ type Config struct {
 	AppsDomain  string // apps are served at <subdomain>.<AppsDomain>
 	AppsNetwork string // Docker network shared by Traefik and the apps
 	RoutesDir   string // folder where route files for Traefik are written
+
+	// Shared secret for GitHub webhooks (the same text is entered in the
+	// repo's webhook settings). Empty = webhooks are off.
+	WebhookSecret string
 }
 
 func Load() Config {
@@ -28,7 +32,8 @@ func Load() Config {
 		AppsNetwork: getenv("APPS_NETWORK", "launchpad-apps"),
 		// Relative to where the API runs (the api/ folder), this is
 		// launchpad/data/routes, the folder docker-compose mounts into Traefik.
-		RoutesDir: getenv("ROUTES_DIR", "../data/routes"),
+		RoutesDir:     getenv("ROUTES_DIR", "../data/routes"),
+		WebhookSecret: os.Getenv("WEBHOOK_SECRET"),
 	}
 }
 

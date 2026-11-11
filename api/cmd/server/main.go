@@ -91,11 +91,25 @@ func run() error {
 	broker := deployment.NewBroker()
 	worker := deployment.NewWorker(deployments, projects, broker, runner, apps)
 	worker.Start(ctx, cfg.Workers) // background goroutines; they stop when ctx is cancelled
-	deployment.NewHandler(deployments, worker, broker).Register(mux)
+	deployment.NewHandler(deployments, worker, broker, apps).Register(mux)
+
+	webhooks := deployment.NewWebhookHandler(cfg.WebhookSecret, projects, worker)
+	webhooks.Register(mux)
+	if !webhooks.Enabled() {
+		slog.Info("github webhooks are off (set WEBHOOK_SECRET to turn them on)")
+	}
+
+	// Settings the dashboard needs to know about.
+	mux.HandleFunc("GET /api/config", func(w http.ResponseWriter, r *http.Request) {
+		httpx.WriteJSON(w, http.StatusOK, map[string]any{
+			"webhooksEnabled": webhooks.Enabled(),
+			"webhookPath":     "/api/webhooks/github",
+		})
+	})
 
 	srv := &http.Server{
 		Addr:              ":" + cfg.Port,
-		Handler:           withRecover(withLogging(mux)),
+		Handler:           withRecover(withLogging(tunnelGuard(mux))),
 		ReadHeaderTimeout: 10 * time.Second, // guards against slow-header (Slowloris) clients
 		// No WriteTimeout on purpose: it would cut off long-lived SSE log streams.
 
@@ -157,6 +171,21 @@ func withLogging(next http.Handler) http.Handler {
 		next.ServeHTTP(rec, r)
 		slog.Info("request", "method", r.Method, "path", r.URL.Path,
 			"status", rec.status, "duration", time.Since(start).Round(time.Millisecond))
+	})
+}
+
+// tunnelGuard: a Cloudflare tunnel makes this API reachable from the
+// internet so GitHub can send webhooks. The API has no login yet, so requests
+// that arrive through the tunnel may ONLY reach the webhook endpoint, which
+// checks its own signature. Cloudflare adds the Cf-Connecting-Ip header to
+// every request it forwards; local requests never have it.
+func tunnelGuard(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Cf-Connecting-Ip") != "" && r.URL.Path != "/api/webhooks/github" {
+			httpx.WriteError(w, http.StatusForbidden, "only the webhook endpoint is reachable from outside")
+			return
+		}
+		next.ServeHTTP(w, r)
 	})
 }
 

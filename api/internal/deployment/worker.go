@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"launchpad/api/internal/project"
@@ -33,6 +34,13 @@ type Worker struct {
 	queue        chan int64
 	buildTimeout time.Duration
 	maxLogLines  int
+
+	// pending holds projects that got a git push while a deployment was
+	// already running. When that deployment ends, ONE new deployment starts
+	// and builds the branch's newest commit: pushes in between are skipped
+	// ("newest commit wins").
+	mu      sync.Mutex
+	pending map[int64]bool
 }
 
 func NewWorker(deployments Store, projects ProjectGetter, broker *Broker, runner Runner, runtime *Runtime) *Worker {
@@ -45,6 +53,46 @@ func NewWorker(deployments Store, projects ProjectGetter, broker *Broker, runner
 		queue:        make(chan int64, 100), // up to 100 waiting builds
 		buildTimeout: 15 * time.Minute,
 		maxLogLines:  5000, // stop storing lines after this, so one build cannot fill the database
+		pending:      map[int64]bool{},
+	}
+}
+
+// ErrDeferred means a push arrived during a running deployment; it will be
+// deployed as soon as that one finishes.
+var ErrDeferred = errors.New("a deployment is already running; this push will deploy when it finishes")
+
+// Deploy records a new deployment and queues it. Used by the Deploy button,
+// rollbacks, config changes and GitHub pushes.
+func (w *Worker) Deploy(ctx context.Context, nd NewDeployment) (Deployment, error) {
+	d, err := w.deployments.Create(ctx, nd)
+	if errors.Is(err, ErrAlreadyActive) && nd.Trigger == TriggerPush {
+		w.mu.Lock()
+		w.pending[nd.ProjectID] = true
+		w.mu.Unlock()
+		return Deployment{}, ErrDeferred
+	}
+	if err != nil {
+		return Deployment{}, err
+	}
+	if err := w.Enqueue(d.ID); err != nil {
+		_ = w.deployments.Fail(ctx, d.ID, err.Error())
+		return Deployment{}, err
+	}
+	return d, nil
+}
+
+// runPending starts the deferred push deployment of a project, if any.
+func (w *Worker) runPending(ctx context.Context, projectID int64) {
+	w.mu.Lock()
+	wanted := w.pending[projectID]
+	delete(w.pending, projectID)
+	w.mu.Unlock()
+
+	if !wanted || ctx.Err() != nil {
+		return
+	}
+	if _, err := w.Deploy(ctx, NewDeployment{ProjectID: projectID, Trigger: TriggerPush}); err != nil {
+		slog.Error("start deferred push deployment", "project", projectID, "err", err)
 	}
 }
 
@@ -68,7 +116,8 @@ func (w *Worker) Start(ctx context.Context, n int) {
 				case <-ctx.Done():
 					return
 				case id := <-w.queue:
-					w.process(ctx, id)
+					projectID := w.process(ctx, id)
+					w.runPending(ctx, projectID)
 				}
 			}
 		}()
@@ -118,7 +167,9 @@ func (b *build) fail(reason string) {
 
 // process runs one deployment: clone -> read commit -> check Dockerfile ->
 // docker build -> release (run it and switch traffic to it).
-func (w *Worker) process(ctx context.Context, id int64) {
+// A rollback or config change skips straight to release with the old image.
+// It returns the project id (0 if the deployment could not be loaded).
+func (w *Worker) process(ctx context.Context, id int64) int64 {
 	ctx, cancel := context.WithTimeout(ctx, w.buildTimeout)
 	defer cancel()
 
@@ -127,13 +178,40 @@ func (w *Worker) process(ctx context.Context, id int64) {
 	d, err := w.deployments.Get(ctx, id)
 	if err != nil {
 		slog.Error("load deployment", "deployment", id, "err", err)
-		return
+		return 0
 	}
 	p, err := w.projects.Get(ctx, d.ProjectID)
 	if err != nil {
 		b.fail("project not found (was it deleted?)")
+		return d.ProjectID
+	}
+
+	if d.Redeploy() {
+		w.redeploy(b, p, d)
+	} else {
+		w.buildAndRelease(b, p)
+	}
+	return d.ProjectID
+}
+
+// redeploy runs an image that was built earlier: no clone, no build, so it
+// takes seconds. Env vars come from the project as it is NOW.
+func (w *Worker) redeploy(b *build, p project.Project, d Deployment) {
+	if d.Trigger == TriggerConfig {
+		b.log(fmt.Sprintf("→ Restarting %s with the current environment variables (no rebuild)", d.ImageTag))
+	} else {
+		b.log(fmt.Sprintf("→ Rolling back to %s from deployment #%d (no rebuild)", d.ImageTag, *d.SourceID))
+	}
+	if !w.runtime.ImageExists(b.ctx, d.ImageTag) {
+		b.fail("image " + d.ImageTag + " no longer exists on this machine")
 		return
 	}
+	w.release(b, p, d.ImageTag)
+}
+
+// buildAndRelease clones the branch, builds its newest commit and releases it.
+func (w *Worker) buildAndRelease(b *build, p project.Project) {
+	ctx, id := b.ctx, b.id
 
 	// A fresh, empty folder per build, removed afterwards whatever happens.
 	dir, err := os.MkdirTemp("", "launchpad-build-*")

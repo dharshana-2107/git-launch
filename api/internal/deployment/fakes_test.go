@@ -25,15 +25,24 @@ func newMemStore() *memStore {
 	return &memStore{nextID: 1, deps: map[int64]Deployment{}, logs: map[int64][]LogLine{}}
 }
 
-func (m *memStore) Create(ctx context.Context, projectID int64) (Deployment, error) {
+func (m *memStore) Create(ctx context.Context, nd NewDeployment) (Deployment, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, d := range m.deps {
-		if d.ProjectID == projectID && !d.Status.Final() {
+		if d.ProjectID == nd.ProjectID && !d.Status.Final() {
 			return Deployment{}, ErrAlreadyActive
 		}
 	}
-	d := Deployment{ID: m.nextID, ProjectID: projectID, Status: StatusQueued, CreatedAt: time.Now()}
+	trigger := nd.Trigger
+	if trigger == "" {
+		trigger = TriggerManual
+	}
+	d := Deployment{ID: m.nextID, ProjectID: nd.ProjectID, Status: StatusQueued, Trigger: trigger, CreatedAt: time.Now()}
+	if nd.Source != nil {
+		src := nd.Source.ID
+		d.SourceID = &src
+		d.ImageTag, d.CommitSHA, d.CommitMessage = nd.Source.ImageTag, nd.Source.CommitSHA, nd.Source.CommitMessage
+	}
 	m.deps[d.ID] = d
 	m.nextID++
 	return d, nil
@@ -141,6 +150,14 @@ func (m *memStore) FailUnfinished(ctx context.Context) (int64, error) { return 0
 
 type fakeProjects map[int64]project.Project
 
+func (f fakeProjects) List(ctx context.Context) ([]project.Project, error) {
+	out := []project.Project{}
+	for _, p := range f {
+		out = append(out, p)
+	}
+	return out, nil
+}
+
 func (f fakeProjects) Get(ctx context.Context, id int64) (project.Project, error) {
 	p, ok := f[id]
 	if !ok {
@@ -159,6 +176,7 @@ type fakeRunner struct {
 	buildFails   bool   // docker build fails
 	appPort      string // what "docker port" reports: a test HTTP server's port
 	appCrashes   bool   // "docker inspect" reports the container exited
+	imageMissing bool   // "docker image inspect" fails (image was deleted)
 
 	mu       sync.Mutex
 	commands []string // every docker command run, for assertions
@@ -213,6 +231,11 @@ func (f *fakeRunner) Output(ctx context.Context, dir string, name string, args .
 		f.running = append(f.running, args[3]) // args: run --detach --name <name> ...
 		f.mu.Unlock()
 		return "3f2a9c1e5b7d", nil
+	case "image":
+		if f.imageMissing {
+			return "", errors.New("no such image")
+		}
+		return "sha256:abc", nil
 	case "port":
 		if f.appCrashes {
 			return "127.0.0.1:1", nil // nothing listens there: the app never answers

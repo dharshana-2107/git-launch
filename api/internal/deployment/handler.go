@@ -13,13 +13,14 @@ import (
 )
 
 type Handler struct {
-	store  Store
-	worker *Worker
-	broker *Broker
+	store   Store
+	worker  *Worker
+	broker  *Broker
+	runtime *Runtime
 }
 
-func NewHandler(store Store, worker *Worker, broker *Broker) *Handler {
-	return &Handler{store: store, worker: worker, broker: broker}
+func NewHandler(store Store, worker *Worker, broker *Broker, runtime *Runtime) *Handler {
+	return &Handler{store: store, worker: worker, broker: broker, runtime: runtime}
 }
 
 func (h *Handler) Register(mux *http.ServeMux) {
@@ -27,6 +28,8 @@ func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/projects/{id}/deployments", h.list)
 	mux.HandleFunc("GET /api/deployments/{id}", h.get)
 	mux.HandleFunc("GET /api/deployments/{id}/events", h.events)
+	mux.HandleFunc("POST /api/deployments/{id}/redeploy", h.redeploy)
+	mux.HandleFunc("GET /api/projects/{id}/app-logs", h.appLogs)
 }
 
 // create records a queued deployment and hands it to the worker.
@@ -36,26 +39,92 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-
-	d, err := h.store.Create(r.Context(), projectID)
-	switch {
-	case errors.Is(err, ErrProjectNotFound):
-		httpx.WriteError(w, http.StatusNotFound, err.Error())
-		return
-	case errors.Is(err, ErrAlreadyActive):
-		httpx.WriteError(w, http.StatusConflict, err.Error())
-		return
-	case err != nil:
-		serverError(w, err)
-		return
-	}
-
-	if err := h.worker.Enqueue(d.ID); err != nil {
-		_ = h.store.Fail(r.Context(), d.ID, err.Error())
-		httpx.WriteError(w, http.StatusServiceUnavailable, err.Error())
+	d, err := h.worker.Deploy(r.Context(), NewDeployment{ProjectID: projectID, Trigger: TriggerManual})
+	if err != nil {
+		deployError(w, err)
 		return
 	}
 	httpx.WriteJSON(w, http.StatusAccepted, d)
+}
+
+// redeploy runs an earlier deployment's image again, without rebuilding:
+//   - an older deployment  -> a ROLLBACK to that version
+//   - the live deployment  -> a CONFIG restart (picks up changed env vars)
+func (h *Handler) redeploy(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	src, err := h.store.Get(r.Context(), id)
+	if errors.Is(err, ErrNotFound) {
+		httpx.WriteError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	// Only a deployment that went live has an image known to work.
+	if src.ImageTag == "" || (src.Status != StatusLive && src.Status != StatusStopped) {
+		httpx.WriteError(w, http.StatusConflict, ErrNoImage.Error())
+		return
+	}
+
+	trigger := TriggerRollback
+	if src.Status == StatusLive {
+		trigger = TriggerConfig
+	}
+	d, err := h.worker.Deploy(r.Context(), NewDeployment{ProjectID: src.ProjectID, Trigger: trigger, Source: &src})
+	if err != nil {
+		deployError(w, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusAccepted, d)
+}
+
+// appLogs returns what the project's running app printed recently
+// (runtime logs, as opposed to build logs).
+func (h *Handler) appLogs(w http.ResponseWriter, r *http.Request) {
+	projectID, ok := pathID(w, r)
+	if !ok {
+		return
+	}
+	live, err := h.store.LiveByProject(r.Context(), projectID)
+	if errors.Is(err, ErrNotFound) {
+		httpx.WriteError(w, http.StatusNotFound, "the project has no live deployment")
+		return
+	}
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	tail := 200
+	if n, err := strconv.Atoi(r.URL.Query().Get("tail")); err == nil && n > 0 && n <= 2000 {
+		tail = n
+	}
+	lines, err := h.runtime.AppLogs(r.Context(), live.ContainerName, tail)
+	if err != nil {
+		httpx.WriteError(w, http.StatusBadGateway, "could not read the app's logs (is the container running?)")
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{
+		"container": live.ContainerName,
+		"lines":     lines,
+	})
+}
+
+// deployError maps Deploy's errors to status codes.
+func deployError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, ErrProjectNotFound):
+		httpx.WriteError(w, http.StatusNotFound, err.Error())
+	case errors.Is(err, ErrAlreadyActive):
+		httpx.WriteError(w, http.StatusConflict, err.Error())
+	case errors.Is(err, ErrQueueFull):
+		httpx.WriteError(w, http.StatusServiceUnavailable, err.Error())
+	default:
+		serverError(w, err)
+	}
 }
 
 func (h *Handler) list(w http.ResponseWriter, r *http.Request) {

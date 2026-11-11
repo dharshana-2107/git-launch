@@ -1,10 +1,17 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api, ApiError, appUrl, Deployment, isFinal } from "../api";
 import BuildLogs from "./BuildLogs";
 
 // The Deployments section of a project page: Deploy button, history list,
 // and the live logs of the selected deployment.
-export default function Deployments({ projectId, subdomain }: { projectId: number; subdomain: string }) {
+type Props = {
+  projectId: number;
+  subdomain: string;
+  refreshKey: number; // bump to force a reload (e.g. after a config change)
+  onLiveChange?: (live: Deployment | undefined) => void;
+};
+
+export default function Deployments({ projectId, subdomain, refreshKey, onLiveChange }: Props) {
   const [deployments, setDeployments] = useState<Deployment[]>([]);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [error, setError] = useState("");
@@ -25,6 +32,13 @@ export default function Deployments({ projectId, subdomain }: { projectId: numbe
 
   useEffect(() => {
     refresh();
+  }, [refresh, refreshKey]);
+
+  // Poll every 5 s, so deployments started by a git push (webhook) show up
+  // without reloading the page.
+  useEffect(() => {
+    const timer = setInterval(refresh, 5000);
+    return () => clearInterval(timer);
   }, [refresh]);
 
   async function deploy() {
@@ -44,6 +58,25 @@ export default function Deployments({ projectId, subdomain }: { projectId: numbe
 
   const running = deployments.some((d) => !isFinal(d.status));
   const live = deployments.find((d) => d.status === "live");
+
+  // Tell the page which deployment is live (it needs it for config restarts).
+  const onLiveRef = useRef(onLiveChange);
+  onLiveRef.current = onLiveChange;
+  useEffect(() => {
+    onLiveRef.current?.(live);
+  }, [live?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  async function rollback(d: Deployment) {
+    if (!window.confirm(`Roll back to commit ${d.commitSha} (deployment #${d.id})? No rebuild needed.`)) return;
+    setError("");
+    try {
+      const created = await api.redeploy(d.id);
+      setSelectedId(created.id);
+      await refresh();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : "Could not roll back");
+    }
+  }
 
   return (
     <section className="card deployments">
@@ -81,8 +114,24 @@ export default function Deployments({ projectId, subdomain }: { projectId: numbe
             >
               <StatusBadge status={d.status} />
               <span className="mono">{d.commitSha || "…"}</span>
-              <span className="commit-msg">{d.error || d.commitMessage}</span>
-              <span className="muted small">{timing(d)}</span>
+              <span className="commit-msg">
+                <span className={`trigger trigger-${d.trigger}`}>{triggerLabel(d)}</span>
+                {d.error || d.commitMessage}
+              </span>
+              <span className="row-end">
+                {d.status === "stopped" && d.imageTag && !running && (
+                  <button
+                    className="button ghost small-button"
+                    onClick={(e) => {
+                      e.stopPropagation(); // do not also select the row
+                      rollback(d);
+                    }}
+                  >
+                    Roll back
+                  </button>
+                )}
+                <span className="muted small">{timing(d)}</span>
+              </span>
             </li>
           ))}
         </ul>
@@ -96,6 +145,19 @@ export default function Deployments({ projectId, subdomain }: { projectId: numbe
 
 export function StatusBadge({ status }: { status: Deployment["status"] }) {
   return <span className={`badge badge-${status}`}>{status}</span>;
+}
+
+function triggerLabel(d: Deployment) {
+  switch (d.trigger) {
+    case "push":
+      return "git push";
+    case "rollback":
+      return `rollback of #${d.sourceDeploymentId ?? "?"}`;
+    case "config":
+      return "env change";
+    default:
+      return "manual";
+  }
 }
 
 // "2m 14s" once finished, otherwise how long ago it was created.

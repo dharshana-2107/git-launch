@@ -88,6 +88,22 @@ input {
 .deploy-list li:hover { background: var(--bg); }
 .deploy-list li.selected { background: var(--bg); box-shadow: inset 3px 0 0 var(--accent); }
 .commit-msg { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row-end { display: flex; align-items: center; gap: 10px; justify-content: flex-end; }
+.small-button { padding: 3px 9px; font-size: 12.5px; }
+.trigger {
+  display: inline-block; margin-right: 8px; padding: 1px 7px; border-radius: 6px;
+  font-size: 11.5px; border: 1px solid var(--border); color: var(--muted);
+}
+.trigger-push { color: #6d28d9; border-color: #ddd6fe; }
+.trigger-rollback { color: #b45309; border-color: #fde68a; }
+.trigger-config { color: #0f766e; border-color: #99f6e4; }
+.logs-short { height: 220px; }
+.follow { display: flex; align-items: center; gap: 6px; }
+.follow input { width: auto; }
+.steps { margin: 0; padding-left: 20px; display: grid; gap: 8px; line-height: 1.5; }
+.steps code { background: var(--bg); padding: 1px 5px; border-radius: 4px; }
+.notice { margin: 16px 0 0; padding: 10px 12px; border-radius: 8px; background: #eff6ff; color: #1e40af; }
+.deployments + .deployments { margin-top: 16px; }
 
 .badge { font-size: 12px; font-weight: 600; padding: 2px 8px; border-radius: 999px; text-align: center; }
 .badge-queued, .badge-cloning, .badge-building, .badge-deploying { background: #fef3c7; color: #92400e; }
@@ -114,6 +130,7 @@ input {
 
 @media (max-width: 600px) {
   .deploy-list li { grid-template-columns: 76px 1fr; }
+  .deploy-list li .row-end { grid-column: 1 / -1; justify-content: space-between; }
   .deploy-list li .commit-msg, .deploy-list li > .muted { grid-column: 1 / -1; }
   .details { grid-template-columns: 1fr; }
 }

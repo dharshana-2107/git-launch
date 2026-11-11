@@ -131,6 +131,21 @@ func (rt *Runtime) Start(ctx context.Context, p project.Project, deploymentID in
 	return line[i+1:], nil
 }
 
+// ImageExists reports whether a built image is still on this machine
+// (a rollback needs it).
+func (rt *Runtime) ImageExists(ctx context.Context, tag string) bool {
+	_, err := rt.runner.Output(ctx, "", "docker", "image", "inspect", "--format", "{{.Id}}", tag)
+	return err == nil
+}
+
+// AppLogs returns the last lines the running app printed (stdout and stderr).
+func (rt *Runtime) AppLogs(ctx context.Context, container string, tail int) ([]string, error) {
+	lines := []string{}
+	err := rt.runner.Run(ctx, "", func(l string) { lines = append(lines, l) },
+		"docker", "logs", "--tail", strconv.Itoa(tail), "--timestamps", container)
+	return lines, err
+}
+
 // ErrUnhealthy means the new container never answered or exited.
 var ErrUnhealthy = errors.New("app did not become healthy")
 

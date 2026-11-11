@@ -30,6 +30,29 @@ func (s Status) Final() bool {
 	return s == StatusLive || s == StatusStopped || s == StatusFailed
 }
 
+// Trigger says why a deployment was started.
+type Trigger string
+
+const (
+	TriggerManual   Trigger = "manual"   // Deploy button
+	TriggerPush     Trigger = "push"     // GitHub webhook
+	TriggerRollback Trigger = "rollback" // redeploy an earlier image, no rebuild
+	TriggerConfig   Trigger = "config"   // restart the live image with new env vars
+)
+
+// NewDeployment is what Create needs. With Source set, the new deployment
+// reuses Source's image and commit and skips cloning and building.
+type NewDeployment struct {
+	ProjectID int64
+	Trigger   Trigger
+	Source    *Deployment
+}
+
+// Redeploy reports whether this deployment reuses an existing image.
+func (d Deployment) Redeploy() bool {
+	return d.SourceID != nil && d.ImageTag != ""
+}
+
 type Deployment struct {
 	ID            int64      `json:"id"`
 	ProjectID     int64      `json:"projectId"`
@@ -38,6 +61,8 @@ type Deployment struct {
 	CommitMessage string     `json:"commitMessage"`
 	ImageTag      string     `json:"imageTag"`
 	ContainerName string     `json:"containerName"`
+	Trigger       Trigger    `json:"trigger"`
+	SourceID      *int64     `json:"sourceDeploymentId"` // rollback/config: the deployment whose image was reused
 	Error         string     `json:"error"`
 	CreatedAt     time.Time  `json:"createdAt"`
 	StartedAt     *time.Time `json:"startedAt"`  // pointer: null until it starts
@@ -55,12 +80,13 @@ var (
 	ErrProjectNotFound = errors.New("project not found")
 	ErrAlreadyActive   = errors.New("this project already has a deployment in progress")
 	ErrQueueFull       = errors.New("build queue is full, try again shortly")
+	ErrNoImage         = errors.New("this deployment has no image to redeploy")
 )
 
 // Store is the storage contract for deployments (Postgres in production,
 // an in-memory fake in tests).
 type Store interface {
-	Create(ctx context.Context, projectID int64) (Deployment, error)
+	Create(ctx context.Context, nd NewDeployment) (Deployment, error)
 	Get(ctx context.Context, id int64) (Deployment, error)
 	ListByProject(ctx context.Context, projectID int64, limit int) ([]Deployment, error)
 

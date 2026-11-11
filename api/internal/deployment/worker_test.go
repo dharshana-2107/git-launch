@@ -44,7 +44,7 @@ func runOnce(t *testing.T, runner *fakeRunner) (*memStore, Deployment, *Worker) 
 	store := newMemStore()
 	w := newTestWorker(t, store, runner)
 
-	d, err := store.Create(context.Background(), 1)
+	d, err := store.Create(context.Background(), NewDeployment{ProjectID: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,9 +91,9 @@ func TestRedeploySwapsContainersWithoutGap(t *testing.T) {
 	w := newTestWorker(t, store, runner)
 	ctx := context.Background()
 
-	first, _ := store.Create(ctx, 1)
+	first, _ := store.Create(ctx, NewDeployment{ProjectID: 1})
 	w.process(ctx, first.ID)
-	second, _ := store.Create(ctx, 1)
+	second, _ := store.Create(ctx, NewDeployment{ProjectID: 1})
 	w.process(ctx, second.ID)
 
 	first, _ = store.Get(ctx, first.ID)
@@ -127,12 +127,12 @@ func TestFailedHealthCheckKeepsOldVersion(t *testing.T) {
 	w := newTestWorker(t, store, runner)
 	ctx := context.Background()
 
-	good, _ := store.Create(ctx, 1)
+	good, _ := store.Create(ctx, NewDeployment{ProjectID: 1})
 	w.process(ctx, good.ID)
 	route, _ := os.ReadFile(w.runtime.routeFile(1))
 
 	runner.appCrashes = true // the next version exits on start-up
-	bad, _ := store.Create(ctx, 1)
+	bad, _ := store.Create(ctx, NewDeployment{ProjectID: 1})
 	w.process(ctx, bad.ID)
 
 	good, _ = store.Get(ctx, good.ID)
@@ -189,10 +189,10 @@ func TestAppPort(t *testing.T) {
 
 func TestOnlyOneActiveDeploymentPerProject(t *testing.T) {
 	store := newMemStore()
-	if _, err := store.Create(context.Background(), 1); err != nil {
+	if _, err := store.Create(context.Background(), NewDeployment{ProjectID: 1}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.Create(context.Background(), 1); err != ErrAlreadyActive {
+	if _, err := store.Create(context.Background(), NewDeployment{ProjectID: 1}); err != ErrAlreadyActive {
 		t.Fatalf("want ErrAlreadyActive, got %v", err)
 	}
 }
@@ -245,7 +245,7 @@ func TestBrokerDropsSlowSubscriber(t *testing.T) {
 func TestStreamReplaysFinishedBuild(t *testing.T) {
 	store, d, _ := runOnce(t, &fakeRunner{appPort: testApp(t, http.StatusOK)})
 	mux := http.NewServeMux()
-	NewHandler(store, nil, NewBroker()).Register(mux)
+	NewHandler(store, nil, NewBroker(), nil).Register(mux)
 
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
@@ -285,7 +285,7 @@ func TestStreamReplaysFinishedBuild(t *testing.T) {
 func TestStreamResumesAfterLastEventID(t *testing.T) {
 	store, _, _ := runOnce(t, &fakeRunner{appPort: testApp(t, http.StatusOK)})
 	mux := http.NewServeMux()
-	NewHandler(store, nil, NewBroker()).Register(mux)
+	NewHandler(store, nil, NewBroker(), nil).Register(mux)
 
 	req := httptest.NewRequest("GET", "/api/deployments/1/events", nil)
 	req.Header.Set("Last-Event-ID", "3")
