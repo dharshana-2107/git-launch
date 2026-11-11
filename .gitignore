@@ -13,3 +13,5 @@ web/*.tsbuildinfo
 
 # Generated at runtime (route files for Traefik)
 data/
+
+docs/
