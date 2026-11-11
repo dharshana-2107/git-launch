@@ -21,6 +21,9 @@ type Config struct {
 	// Shared secret for GitHub webhooks (the same text is entered in the
 	// repo's webhook settings). Empty = webhooks are off.
 	WebhookSecret string
+
+	KeepImages  int // images kept per project for rollback
+	MaxLiveApps int // most apps that may run at once
 }
 
 func Load() Config {
@@ -34,6 +37,8 @@ func Load() Config {
 		// launchpad/data/routes, the folder docker-compose mounts into Traefik.
 		RoutesDir:     getenv("ROUTES_DIR", "../data/routes"),
 		WebhookSecret: os.Getenv("WEBHOOK_SECRET"),
+		KeepImages:    getenvInt("KEEP_IMAGES", 5),
+		MaxLiveApps:   getenvInt("MAX_LIVE_APPS", 10),
 	}
 }
 

@@ -63,6 +63,7 @@ type Deployment struct {
 	ContainerName string     `json:"containerName"`
 	Trigger       Trigger    `json:"trigger"`
 	SourceID      *int64     `json:"sourceDeploymentId"` // rollback/config: the deployment whose image was reused
+	ImagePruned   bool       `json:"imagePruned"`        // the image was deleted to save disk: no rollback
 	Error         string     `json:"error"`
 	CreatedAt     time.Time  `json:"createdAt"`
 	StartedAt     *time.Time `json:"startedAt"`  // pointer: null until it starts
@@ -81,6 +82,7 @@ var (
 	ErrAlreadyActive   = errors.New("this project already has a deployment in progress")
 	ErrQueueFull       = errors.New("build queue is full, try again shortly")
 	ErrNoImage         = errors.New("this deployment has no image to redeploy")
+	ErrAppLimit        = errors.New("the limit of running apps is reached: delete a project first")
 )
 
 // Store is the storage contract for deployments (Postgres in production,
@@ -99,6 +101,14 @@ type Store interface {
 	MarkLive(ctx context.Context, projectID, id int64) error
 	// LiveByProject returns the project's live deployment, or ErrNotFound.
 	LiveByProject(ctx context.Context, projectID int64) (Deployment, error)
+	// CountLive returns how many projects have a live deployment.
+	CountLive(ctx context.Context) (int, error)
+
+	// OldImages returns the project's image tags beyond the newest `keep`
+	// (by last use), never the live one: these can be deleted.
+	OldImages(ctx context.Context, projectID int64, keep int) ([]string, error)
+	// MarkImagePruned flags every deployment of the project using tag.
+	MarkImagePruned(ctx context.Context, projectID int64, tag string) error
 	Fail(ctx context.Context, id int64, reason string) error
 
 	AppendLog(ctx context.Context, id int64, line int, text string) error

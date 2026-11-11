@@ -138,6 +138,15 @@ func (rt *Runtime) ImageExists(ctx context.Context, tag string) bool {
 	return err == nil
 }
 
+// RemoveImage deletes a built image. An image that is already gone counts
+// as removed.
+func (rt *Runtime) RemoveImage(ctx context.Context, tag string) error {
+	if _, err := rt.runner.Output(ctx, "", "docker", "image", "rm", tag); err != nil && rt.ImageExists(ctx, tag) {
+		return err
+	}
+	return nil
+}
+
 // AppLogs returns the last lines the running app printed (stdout and stderr).
 func (rt *Runtime) AppLogs(ctx context.Context, container string, tail int) ([]string, error) {
 	lines := []string{}
@@ -260,6 +269,16 @@ func (rt *Runtime) Remove(ctx context.Context, name string) {
 func (rt *Runtime) RemoveProject(ctx context.Context, projectID int64) {
 	rt.StopOthers(ctx, projectID, "", func(string) {})
 	_ = os.Remove(rt.routeFile(projectID))
+
+	// Images are built with a launchpad.project label, so they can be found
+	// and deleted too (otherwise every old build would stay on disk forever).
+	out, err := rt.runner.Output(ctx, "", "docker", "images", "--quiet",
+		"--filter", fmt.Sprintf("label=%s=%d", labelProject, projectID))
+	if err != nil || out == "" {
+		return
+	}
+	args := append([]string{"image", "rm", "--force"}, strings.Fields(out)...)
+	_, _ = rt.runner.Output(ctx, "", "docker", args...)
 }
 
 // containers lists the names of our containers matching a label filter,

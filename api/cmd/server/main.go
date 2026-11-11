@@ -90,6 +90,8 @@ func run() error {
 
 	broker := deployment.NewBroker()
 	worker := deployment.NewWorker(deployments, projects, broker, runner, apps)
+	worker.KeepImages = cfg.KeepImages
+	worker.MaxLiveApps = cfg.MaxLiveApps
 	worker.Start(ctx, cfg.Workers) // background goroutines; they stop when ctx is cancelled
 	deployment.NewHandler(deployments, worker, broker, apps).Register(mux)
 

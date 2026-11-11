@@ -119,7 +119,8 @@ export default function Deployments({ projectId, subdomain, refreshKey, onLiveCh
                 {d.error || d.commitMessage}
               </span>
               <span className="row-end">
-                {d.status === "stopped" && d.imageTag && !running && (
+                {d.status === "stopped" && d.imagePruned && <span className="muted small">image deleted</span>}
+                {d.status === "stopped" && d.imageTag && !d.imagePruned && !running && (
                   <button
                     className="button ghost small-button"
                     onClick={(e) => {

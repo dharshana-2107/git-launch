@@ -7,7 +7,9 @@ services:
       POSTGRES_PASSWORD: launchpad   # local development only
       POSTGRES_DB: launchpad
     ports:
-      - "5432:5432"
+      # 127.0.0.1 = reachable from this Mac only, not from other machines on
+      # your Wi-Fi. (Apps are on a different Docker network, see below.)
+      - "127.0.0.1:5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data   # data survives `docker compose down`
     healthcheck:
@@ -29,7 +31,7 @@ services:
       - --api.insecure=true            # dashboard on :8090 without login: local only
     ports:
       - "80:80"        # the apps:            http://<subdomain>.localhost
-      - "8090:8080"    # Traefik's dashboard:  http://localhost:8090
+      - "127.0.0.1:8090:8080"    # Traefik's dashboard: http://localhost:8090 (this Mac only)
     volumes:
       - ./data/routes:/routes:ro       # read-only: Traefik never writes routes
     networks:
@@ -39,6 +41,8 @@ services:
 networks:
   # Every app container joins this network, so Traefik reaches them by name
   # (e.g. http://lp-hello-42:3000). The API passes --network launchpad-apps.
+  # Postgres is NOT on it, so apps cannot reach the platform's database by
+  # container name.
   apps:
     name: launchpad-apps
 

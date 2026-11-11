@@ -65,7 +65,7 @@ func (h *Handler) redeploy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Only a deployment that went live has an image known to work.
-	if src.ImageTag == "" || (src.Status != StatusLive && src.Status != StatusStopped) {
+	if src.ImageTag == "" || src.ImagePruned || (src.Status != StatusLive && src.Status != StatusStopped) {
 		httpx.WriteError(w, http.StatusConflict, ErrNoImage.Error())
 		return
 	}
@@ -118,7 +118,7 @@ func deployError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, ErrProjectNotFound):
 		httpx.WriteError(w, http.StatusNotFound, err.Error())
-	case errors.Is(err, ErrAlreadyActive):
+	case errors.Is(err, ErrAlreadyActive), errors.Is(err, ErrAppLimit):
 		httpx.WriteError(w, http.StatusConflict, err.Error())
 	case errors.Is(err, ErrQueueFull):
 		httpx.WriteError(w, http.StatusServiceUnavailable, err.Error())

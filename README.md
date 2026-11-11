@@ -1,37 +1,89 @@
 # Launchpad
 
-A self-hosted mini Vercel/Render: point it at a GitHub repo with a Dockerfile and it builds the image, runs it, and serves it at `http://<subdomain>.localhost`, with live build logs, deployment history and one-click rollback.
+A self-hosted deployment platform, a small Vercel/Render. Point it at a GitHub repo with a Dockerfile, and every `git push` builds the image, health-checks it and switches traffic to it at `http://<subdomain>.localhost`, with zero downtime, live build logs and one-click rollback.
 
-**Status: phase 4 of 5.** Projects; deployments with live build logs (Server-Sent Events); apps served at `http://<subdomain>.localhost` behind Traefik with health-checked, zero-downtime switch-overs; deploy on `git push` (signed GitHub webhooks); one-click rollback and env-var restarts without rebuilding; app runtime logs.
+![CI](https://github.com/dharshana-2107/launchpad/actions/workflows/ci.yml/badge.svg)
+
+**Features**
+
+- **Deploy from GitHub:** create a project from a public repo, click Deploy or just `git push` (signed GitHub webhooks)
+- **Live build logs:** streamed to the browser while the build runs (Server-Sent Events), with replay and resume
+- **Zero-downtime releases:** the new container is health-checked before traffic moves; a broken version never goes live
+- **Instant rollback:** any earlier version, from its stored image, in seconds, no rebuild
+- **Env vars:** saved per project; changing them restarts the app with no rebuild
+- **App logs:** what the running app prints, in the dashboard
+- **Guard rails:** per-app memory/CPU/process limits, a cap on running apps, old images cleaned up, only the signed webhook reachable from the internet
+
+## Architecture
+
+```mermaid
+flowchart LR
+    dev([Developer]) -- git push --> gh[GitHub]
+    gh -- "webhook (HMAC signed)" --> tunnel[Cloudflare tunnel]
+    tunnel --> api
+
+    subgraph mac [Your machine]
+        web[React dashboard<br/>:5173] -- "REST + SSE" --> api[Go API<br/>:8080]
+        api --- pg[(PostgreSQL)]
+        api -- "job queue (channel)" --> worker[Build workers<br/>goroutines]
+        worker -- "git clone<br/>docker build / run" --> docker[Docker]
+        worker -- "writes route file" --> routes[/data/routes/*.yml/]
+        routes -. watched by .-> traefik[Traefik<br/>:80]
+        subgraph net [Docker network: launchpad-apps]
+            traefik --> app1[lp-hello-42]
+            traefik --> app2[lp-blog-17]
+        end
+    end
+
+    user([Visitor]) -- "http://hello.localhost" --> traefik
+```
+
+**A deploy, step by step**
+
+1. **Queue:** the API records a `queued` deployment and puts its id on a Go channel, then answers `202 Accepted`. A partial unique index allows only one unfinished deployment per project.
+2. **Build:** a worker goroutine clones the branch (`--depth 1`), reads the commit, and runs `docker build`. The image is tagged with the commit SHA. Every output line is numbered, stored in Postgres and pushed to the browser over SSE.
+3. **Start:** the new container starts **next to** the old one, with memory, CPU and process limits, on the `launchpad-apps` network.
+4. **Health check:** the API calls the app until it answers HTTP. If it crashes or never answers, it is removed, and the old version keeps serving.
+5. **Switch:** the API rewrites the project's Traefik route file (written to a temp file, then renamed, which is atomic). Traefik reloads in milliseconds.
+6. **Drain and clean up:** after 3 seconds the old container is removed, and images beyond the newest 5 are deleted.
+
+## Design decisions
+
+| Decision | Why | Trade-off |
+| --- | --- | --- |
+| Go standard library (`net/http`, `database/sql` + pgx) | Few dependencies, every line explainable | More code than a framework or ORM |
+| Builds in background goroutines, queue = buffered channel | Requests return instantly; no extra service | Queue lives in memory: unfinished builds are marked failed on restart |
+| SSE for logs, not WebSockets | Logs flow one way; plain HTTP; browser reconnects with `Last-Event-ID` | Not suitable for two-way features (a web terminal would need WebSockets) |
+| Database constraints for races (unique subdomain, one active and one live deployment per project) | Correct even when two requests arrive together | Errors must be mapped from Postgres codes |
+| API writes Traefik route files (not Docker labels) | Traffic moves only after the health check; Traefik needs no Docker socket | The platform manages routing itself |
+| Image tag = commit SHA, images kept | Rollback in seconds, no rebuild; every image traceable | Disk use: bounded by keeping the newest 5 |
+| HMAC-verified webhooks, constant-time compare | Only GitHub can trigger deploys; no timing leak | One shared secret for all repos (a GitHub App would scale better) |
+| `git` and `docker` as commands behind a `Runner` interface | No heavy SDKs; worker logic tested with fakes, no Docker in CI | Parses CLI output |
+
+What would change for production: HTTPS and a real wildcard domain, a GitHub App instead of per-repo webhooks, login and per-user projects, a durable queue (Redis/SQS), isolated builds (rootless BuildKit or a VM per build), several machines (or Kubernetes).
+
+## Tech stack
 
 | Part | Tech |
 | --- | --- |
 | API | Go 1.22+ (standard library `net/http`, `database/sql` + `pgx` driver) |
-| Database | PostgreSQL 16 |
+| Database | PostgreSQL 16 (schema migrations embedded in the binary) |
 | Dashboard | React 18 + TypeScript + Vite |
-| Builds | `git` + `docker build`, run by background worker goroutines |
-| Running apps | Docker containers with memory/CPU limits, health-checked before going live |
-| Routing | Traefik reverse proxy, route files written by the API |
-| Deploy on push | GitHub webhooks (HMAC-SHA256 verified) through a Cloudflare tunnel |
-| Live logs | Server-Sent Events (`EventSource` in the browser) |
-| Local services | Docker Compose |
+| Builds and apps | Git, Docker |
+| Routing | Traefik v3 (file provider) |
+| Live logs | Server-Sent Events (`EventSource`) |
+| Deploy on push | GitHub webhooks, Cloudflare quick tunnel |
+| CI | GitHub Actions: gofmt, go vet, go test -race, TypeScript build |
 
 ## Run it on a Mac
 
 ### 1. Install the tools (once)
 
 ```bash
-brew install go node          # Go 1.22 or newer, Node 20 or newer
+brew install go node git
 ```
 
-Install **Docker Desktop** from docker.com and start it (whale icon in the menu bar).
-`git` is also needed (`git --version`; macOS offers to install it the first time).
-
-Check:
-
-```bash
-go version && node -v && docker --version
-```
+Install **Docker Desktop** from docker.com and start it.
 
 ### 2. Start Postgres and Traefik
 
@@ -40,20 +92,11 @@ docker compose up -d          # from the repo root
 docker compose ps             # postgres "healthy", traefik "Up"
 ```
 
-Traefik's dashboard (routes it knows about): http://localhost:8090
-
 ### 3. Start the API (terminal 1)
 
 ```bash
 cd api
-go mod download               # first time only
-go run ./cmd/server
-```
-
-You should see `applied migration` and `api listening port=8080`. Check it:
-
-```bash
-curl localhost:8080/api/health          # {"status":"ok"}
+go run ./cmd/server           # must run from api/: it writes routes to ../data/routes
 ```
 
 ### 4. Start the dashboard (terminal 2)
@@ -64,136 +107,95 @@ npm install                   # first time only
 npm run dev
 ```
 
-Open http://localhost:5173.
+Open http://localhost:5173 (Chrome or Firefox: Safari may not resolve `*.localhost`).
 
-### 5. Run the tests
+### 5. Deploy something
 
-```bash
-cd api && go test ./...
-```
+1. Push `samples/hello-app` to its own public GitHub repo.
+2. **New project** → that repo's URL, branch `main`, subdomain `hello` → **Deploy**.
+3. When it says **live**, open http://hello.localhost.
 
-## Deploy something
-
-1. Push `samples/hello-app` to its **own** public GitHub repo (see its README).
-2. In the dashboard: **New project** → that repo's URL, branch `main`, subdomain `hello`.
-3. On the project page click **Deploy** and watch the build logs stream.
-4. When it says **live**, open http://hello.localhost (use **Chrome or Firefox**; Safari may not resolve `*.localhost`).
-5. Change the `GREETING` env var on the project and deploy again: the page changes with no downtime.
-
-Useful commands:
+### 6. Deploy on git push (optional)
 
 ```bash
-docker ps --filter label=launchpad.managed=true    # running apps
-cat data/routes/project-*.yml                      # the routing table Traefik reads
-curl -H "Host: hello.localhost" localhost          # works in any terminal
+brew install cloudflared
+export WEBHOOK_SECRET=<any long random text>       # in terminal 1, then restart the API
+cloudflared tunnel --url http://localhost:8080     # terminal 3: prints https://….trycloudflare.com
 ```
 
-## Deploy on git push (optional)
+In the hello-app repo on GitHub: **Settings → Webhooks → Add webhook**. Payload URL `https://….trycloudflare.com/api/webhooks/github`, content type `application/json`, the same secret, "Just the push event". Push a commit and watch it deploy. Only the webhook path is reachable through the tunnel; everything else answers 403.
 
-GitHub must be able to reach your Mac, so this uses a free Cloudflare tunnel.
-
-1. Install it once: `brew install cloudflared`
-2. Pick a secret (any long random text), e.g. `openssl rand -hex 20`, and start the API with it:
-   ```bash
-   cd api
-   WEBHOOK_SECRET=<your secret> go run ./cmd/server
-   ```
-3. In a third terminal: `cloudflared tunnel --url http://localhost:8080`. It prints an address like `https://random-words.trycloudflare.com`.
-4. On GitHub, open your hello-app repo → **Settings → Webhooks → Add webhook**:
-   - Payload URL: `https://random-words.trycloudflare.com/api/webhooks/github`
-   - Content type: `application/json`
-   - Secret: the same secret as step 2
-   - Events: **Just the push event**
-5. GitHub sends a "ping"; the webhook should show a green tick. Now push a change to hello-app: a deployment starts by itself.
-
-The tunnel address changes every time you restart `cloudflared`; update the webhook URL when it does. Only `/api/webhooks/github` is reachable through the tunnel: every other path answers 403.
-
-## Try the API with curl
+### Tests
 
 ```bash
-curl -X POST localhost:8080/api/projects \
-  -H 'Content-Type: application/json' \
-  -d '{"name":"Hello","repoUrl":"https://github.com/octocat/Hello-World","subdomain":"hello","envVars":{"PORT":"3000"}}'
-
-curl localhost:8080/api/projects
-curl localhost:8080/api/projects/1
-curl -X DELETE localhost:8080/api/projects/1
-
-curl -X POST localhost:8080/api/projects/1/deployments      # start a build (202)
-curl -N localhost:8080/api/deployments/1/events             # watch it live (-N = no buffering)
-curl -X POST localhost:8080/api/deployments/1/redeploy      # rollback (older) or restart (live), no rebuild
-curl localhost:8080/api/projects/1/app-logs                 # what the running app printed
+cd api && go test -race ./...
 ```
+
+## Settings (environment variables of the API)
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `PORT` | `8080` | API port |
+| `DATABASE_URL` | local Postgres from docker compose | Postgres connection |
+| `BUILD_WORKERS` | `2` | builds that may run at the same time |
+| `APPS_DOMAIN` | `localhost` | apps are served at `<subdomain>.<APPS_DOMAIN>` |
+| `ROUTES_DIR` | `../data/routes` | where route files for Traefik are written |
+| `WEBHOOK_SECRET` | (empty = off) | shared secret for GitHub webhooks |
+| `KEEP_IMAGES` | `5` | images kept per project for rollback |
+| `MAX_LIVE_APPS` | `10` | most apps that may run at once |
+
+Each app gets `PORT` (default 3000, override with a `PORT` env var on the project) plus its own env vars.
 
 ## API
 
 | Method | Path | Success | Errors |
 | --- | --- | --- | --- |
 | GET | `/api/health` | 200 | |
+| GET | `/api/config` | 200 `{webhooksEnabled, webhookPath}` | |
 | GET | `/api/projects` | 200 list | |
 | POST | `/api/projects` | 201 project | 400 bad JSON, 409 subdomain taken, 422 invalid fields |
-| GET | `/api/projects/{id}` | 200 project with env vars | 400 bad id, 404 |
+| GET | `/api/projects/{id}` | 200 project with env vars | 400, 404 |
 | PUT | `/api/projects/{id}` | 200 project | 400, 404, 409, 422 |
-| DELETE | `/api/projects/{id}` | 204 | 400, 404 |
-| POST | `/api/projects/{id}/deployments` | 202 queued deployment | 404 project, 409 one already running, 503 queue full |
+| DELETE | `/api/projects/{id}` | 204 (also removes its containers, route and images) | 400, 404 |
+| POST | `/api/projects/{id}/deployments` | 202 queued deployment | 404, 409 one already running or app limit, 503 queue full |
 | GET | `/api/projects/{id}/deployments` | 200 latest 20 | |
+| GET | `/api/projects/{id}/app-logs?tail=200` | 200 `{container, lines}` | 404 not live |
 | GET | `/api/deployments/{id}` | 200 deployment | 404 |
-| GET | `/api/deployments/{id}/events` | SSE stream: `log`, `status`, `done` events | 404 |
-| POST | `/api/deployments/{id}/redeploy` | 202: rollback (stopped deployment) or config restart (live deployment) | 404, 409 failed/no image or one already running |
-| GET | `/api/projects/{id}/app-logs?tail=200` | 200 `{container, lines}` | 404 not live, 502 container unreachable |
-| POST | `/api/webhooks/github` | 202 deployments queued/deferred; 200 to `ping` | 401 bad signature, 503 `WEBHOOK_SECRET` not set |
-| GET | `/api/config` | 200 `{webhooksEnabled, webhookPath}` | |
+| GET | `/api/deployments/{id}/events` | SSE: `log`, `status`, `done` | 404 |
+| POST | `/api/deployments/{id}/redeploy` | 202 rollback (older) or restart (live) | 404, 409 no image / one running |
+| POST | `/api/webhooks/github` | 202 queued/deferred, 200 to `ping` | 401 bad signature, 503 webhooks off |
 
 ## Project layout
 
 ```
 api/
-  cmd/server/main.go          start-up, middleware, graceful shutdown
-  internal/config/            settings from environment variables
-  internal/db/                connection pool + migrations (SQL embedded in the binary)
-  internal/httpx/             JSON helpers shared by all handlers
-  internal/project/           model, validation, Postgres store, HTTP handlers, tests
-  internal/deployment/        build worker + queue, git/docker runner, live-log broker, SSE,
-                              runtime (containers, health check, Traefik routes),
-                              GitHub webhook, rollback/redeploy, tests
-web/
-  src/api.ts                  every call to the API
-  src/pages/                  Projects list, New project, Project details
-  src/components/ProjectForm  shared create/edit form
-  src/components/Deployments  Deploy button + deployment history
-  src/components/BuildLogs    live log viewer (EventSource)
-  src/components/AppLogs      running app's output
-  src/components/AutoDeploy   deploy-on-push setup steps
-samples/hello-app/            tiny Node app with a Dockerfile, to deploy
-docs/STUDY-PHASE-1.md         how each phase works + interview questions
-docs/STUDY-PHASE-2.md
-docs/STUDY-PHASE-3.md
-docs/STUDY-PHASE-4.md
-docker-compose.yml            Postgres + Traefik
-data/routes/                  route files for Traefik (generated, not in git)
+  cmd/server/main.go           start-up, wiring, middleware, graceful shutdown
+  internal/config/             settings from environment variables
+  internal/db/                 connection pool, embedded migrations, Postgres error codes
+  internal/httpx/              JSON helpers
+  internal/project/            projects: model, validation, store, handlers
+  internal/deployment/         queue + workers, git/docker runner, SSE broker, runtime
+                               (containers, health check, routes), webhook, rollback, tests
+web/src/                       React dashboard (pages, components, api.ts)
+samples/hello-app/             tiny Node app with a Dockerfile
+docs/                          study guides per phase, demo script, interview cheat sheet
+docker-compose.yml             Postgres + Traefik
+.github/workflows/ci.yml       CI
 ```
 
 ## Troubleshooting
 
 | Problem | Fix |
 | --- | --- |
-| `ping database: ... connection refused` | Docker Desktop not running, or run `docker compose up -d` |
-| `port 5432 already in use` | Another Postgres is running: `brew services stop postgresql` or change the port in `docker-compose.yml` and `DATABASE_URL` |
-| `address already in use :8080` | Run with another port: `PORT=8081 go run ./cmd/server` and update `web/vite.config.ts` |
-| Dashboard shows "Could not load projects" | The API is not running in terminal 1 |
-| Build fails at `docker build` with "Cannot connect to the Docker daemon" | Start Docker Desktop |
-| Build fails at `git clone` | The repo must be public and the branch must exist (many older repos use `master`) |
-| Build fails with "no Dockerfile" | The Dockerfile must be in the repo's root folder |
-| Deployment stuck as failed "server restarted" | Expected: builds running when the API stopped are marked failed at start-up |
-| `docker compose up` says port 80 is in use | Something else uses port 80. Change `"80:80"` to `"8000:80"` in `docker-compose.yml`, create `web/.env` with `VITE_APPS_PORT=8000`, and open apps at `http://hello.localhost:8000` |
-| Deploy fails: `network launchpad-apps not found` | Run `docker compose up -d` (it creates the network) |
-| Deploy fails: "app did not become healthy" | The app must listen on the `PORT` env var (default 3000). The build log shows the app's last output |
-| `hello.localhost` does not open in Safari | Use Chrome or Firefox, or `curl -H "Host: hello.localhost" localhost` |
-| `hello.localhost` shows 404 after a successful deploy | Traefik did not pick up the route file: `docker compose restart traefik` |
-| The API must run from the `api/` folder | It writes route files to `../data/routes`, the folder Traefik reads. Set `ROUTES_DIR` to run it elsewhere |
-| GitHub webhook shows a red cross, "401 invalid signature" | The secret in GitHub and `WEBHOOK_SECRET` must match exactly; content type must be `application/json` |
-| GitHub webhook shows "503" | Restart the API with `WEBHOOK_SECRET=...` |
-| GitHub webhook times out | `cloudflared` stopped or its address changed: restart it and update the Payload URL |
-| Push arrives but nothing deploys | The project's repo URL and branch must match the pushed repo and branch |
-| "Roll back" fails: image no longer exists | The image was deleted (`docker image prune`); deploy that commit again instead |
+| `ping database: connection refused` | Start Docker Desktop and `docker compose up -d`; check `docker compose ps` shows `127.0.0.1:5432->5432` |
+| `port 5432 already in use` | Another Postgres runs: stop it, or change the port in `docker-compose.yml` and `DATABASE_URL` |
+| `port 80 already in use` | Change `"80:80"` to `"8000:80"`, set `VITE_APPS_PORT=8000` in `web/.env`, open `http://hello.localhost:8000` |
+| Build fails at `git clone` | Repo must be public, branch must exist |
+| "no Dockerfile" | The Dockerfile must be in the repo root |
+| "app did not become healthy" | The app must listen on `PORT` (default 3000); the build log shows its last output |
+| `network launchpad-apps not found` | `docker compose up -d` creates it |
+| `hello.localhost` shows 404 after a deploy | `docker compose restart traefik` |
+| Webhook 401 | Secret mismatch. "Redeliver" re-sends the OLD signature: push a new commit to test |
+| Webhook times out | `cloudflared` stopped or its address changed: restart it, update the Payload URL |
+| "limit of running apps is reached" | Delete a project, or raise `MAX_LIVE_APPS` |
 | Start from an empty database | `docker compose down -v` (deletes all data) |

@@ -39,6 +39,7 @@ export type Deployment = {
   containerName: string;
   trigger: "manual" | "push" | "rollback" | "config";
   sourceDeploymentId: number | null; // rollback/config: whose image was reused
+  imagePruned: boolean; // image deleted to save disk: no rollback
   error: string;
   createdAt: string;
   startedAt: string | null;

@@ -17,7 +17,7 @@ func NewPostgresStore(db *sql.DB) *PostgresStore {
 	return &PostgresStore{db: db}
 }
 
-const columns = `id, project_id, status, commit_sha, commit_message, image_tag, container_name, trigger, source_deployment_id, error, created_at, started_at, finished_at`
+const columns = `id, project_id, status, commit_sha, commit_message, image_tag, container_name, trigger, source_deployment_id, image_pruned, error, created_at, started_at, finished_at`
 
 type scanner interface {
 	Scan(dest ...any) error
@@ -27,7 +27,7 @@ func scan(row scanner) (Deployment, error) {
 	var d Deployment
 	// StartedAt / FinishedAt are *time.Time: database/sql sets them to nil for NULL.
 	err := row.Scan(&d.ID, &d.ProjectID, &d.Status, &d.CommitSHA, &d.CommitMessage,
-		&d.ImageTag, &d.ContainerName, &d.Trigger, &d.SourceID, &d.Error, &d.CreatedAt, &d.StartedAt, &d.FinishedAt)
+		&d.ImageTag, &d.ContainerName, &d.Trigger, &d.SourceID, &d.ImagePruned, &d.Error, &d.CreatedAt, &d.StartedAt, &d.FinishedAt)
 	return d, err
 }
 
@@ -153,6 +153,46 @@ func (s *PostgresStore) LiveByProject(ctx context.Context, projectID int64) (Dep
 		return Deployment{}, ErrNotFound
 	}
 	return d, err
+}
+
+func (s *PostgresStore) CountLive(ctx context.Context) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx, `SELECT count(*) FROM deployments WHERE status = 'live'`).Scan(&n)
+	return n, err
+}
+
+// OldImages groups the project's deployments by image tag (several
+// deployments can share one image: rollbacks, config restarts), orders the
+// tags by their most recent use and skips the newest `keep` of them.
+func (s *PostgresStore) OldImages(ctx context.Context, projectID int64, keep int) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT image_tag
+		FROM deployments
+		WHERE project_id = $1 AND image_tag <> '' AND NOT image_pruned
+		GROUP BY image_tag
+		HAVING bool_and(status <> 'live')        -- never the image that is live
+		ORDER BY max(created_at) DESC
+		OFFSET $2`, projectID, keep)
+	if err != nil {
+		return nil, fmt.Errorf("find old images: %w", err)
+	}
+	defer rows.Close()
+
+	tags := []string{}
+	for rows.Next() {
+		var t string
+		if err := rows.Scan(&t); err != nil {
+			return nil, err
+		}
+		tags = append(tags, t)
+	}
+	return tags, rows.Err()
+}
+
+func (s *PostgresStore) MarkImagePruned(ctx context.Context, projectID int64, tag string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE deployments SET image_pruned = true WHERE project_id = $1 AND image_tag = $2`, projectID, tag)
+	return err
 }
 
 func (s *PostgresStore) Fail(ctx context.Context, id int64, reason string) error {

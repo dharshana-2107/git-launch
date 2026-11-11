@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 
@@ -34,6 +35,8 @@ type Worker struct {
 	queue        chan int64
 	buildTimeout time.Duration
 	maxLogLines  int
+	KeepImages   int // images kept per project for rollback; older ones are deleted
+	MaxLiveApps  int // most apps that may run at once (0 = no limit)
 
 	// pending holds projects that got a git push while a deployment was
 	// already running. When that deployment ends, ONE new deployment starts
@@ -53,6 +56,8 @@ func NewWorker(deployments Store, projects ProjectGetter, broker *Broker, runner
 		queue:        make(chan int64, 100), // up to 100 waiting builds
 		buildTimeout: 15 * time.Minute,
 		maxLogLines:  5000, // stop storing lines after this, so one build cannot fill the database
+		KeepImages:   5,
+		MaxLiveApps:  10,
 		pending:      map[int64]bool{},
 	}
 }
@@ -64,6 +69,9 @@ var ErrDeferred = errors.New("a deployment is already running; this push will de
 // Deploy records a new deployment and queues it. Used by the Deploy button,
 // rollbacks, config changes and GitHub pushes.
 func (w *Worker) Deploy(ctx context.Context, nd NewDeployment) (Deployment, error) {
+	if err := w.checkAppLimit(ctx, nd.ProjectID); err != nil {
+		return Deployment{}, err
+	}
 	d, err := w.deployments.Create(ctx, nd)
 	if errors.Is(err, ErrAlreadyActive) && nd.Trigger == TriggerPush {
 		w.mu.Lock()
@@ -79,6 +87,30 @@ func (w *Worker) Deploy(ctx context.Context, nd NewDeployment) (Deployment, erro
 		return Deployment{}, err
 	}
 	return d, nil
+}
+
+// checkAppLimit refuses to bring ANOTHER app online once MaxLiveApps are
+// running. Redeploying a project that is already live does not add an app,
+// so it is always allowed.
+//
+// It is a soft limit: two projects deploying at the very same moment could
+// both pass the check. Fine for a guard against filling the machine; a hard
+// limit would need a lock or a counter row in the database.
+func (w *Worker) checkAppLimit(ctx context.Context, projectID int64) error {
+	if w.MaxLiveApps <= 0 {
+		return nil
+	}
+	if _, err := w.deployments.LiveByProject(ctx, projectID); err == nil {
+		return nil // already live: replacing it keeps the count the same
+	}
+	n, err := w.deployments.CountLive(ctx)
+	if err != nil {
+		return err
+	}
+	if n >= w.MaxLiveApps {
+		return ErrAppLimit
+	}
+	return nil
 }
 
 // runPending starts the deferred push deployment of a project, if any.
@@ -255,7 +287,9 @@ func (w *Worker) buildAndRelease(b *build, p project.Project) {
 		return
 	}
 	b.log("→ Building image " + tag)
-	if err := w.runner.Run(ctx, dir, b.log, "docker", "build", "--progress=plain", "-t", tag, "."); err != nil {
+	if err := w.runner.Run(ctx, dir, b.log, "docker", "build", "--progress=plain",
+		"--label", fmt.Sprintf("%s=%d", labelProject, p.ID), // lets RemoveProject find its images
+		"-t", tag, "."); err != nil {
 		b.fail(explain("docker build failed: see the lines above", err))
 		return
 	}
@@ -321,6 +355,7 @@ func (w *Worker) release(b *build, p project.Project, image string) {
 	case <-ctx.Done():
 	}
 	rt.StopOthers(context.Background(), p.ID, name, b.log)
+	w.pruneImages(context.Background(), p, b.log)
 
 	b.log("✓ Live at " + rt.AppURL(p))
 	b.w.broker.Publish(b.id, Event{Type: "status", Status: StatusLive})
@@ -335,4 +370,26 @@ func explain(msg string, err error) string {
 		return "deployment cancelled (server shutting down)"
 	}
 	return msg
+}
+
+// pruneImages deletes the project's images beyond the newest KeepImages, so
+// disk use stays bounded. The live image is never deleted. Deployments using
+// a deleted image are flagged, and the dashboard stops offering a rollback.
+func (w *Worker) pruneImages(ctx context.Context, p project.Project, logf func(string)) {
+	if w.KeepImages <= 0 {
+		return
+	}
+	tags, err := w.deployments.OldImages(ctx, p.ID, w.KeepImages)
+	if err != nil {
+		slog.Error("find old images", "project", p.ID, "err", err)
+		return
+	}
+	for _, tag := range tags {
+		if err := w.runtime.RemoveImage(ctx, tag); err != nil {
+			slog.Warn("remove old image", "image", tag, "err", err)
+			continue
+		}
+		_ = w.deployments.MarkImagePruned(ctx, p.ID, tag)
+		logf("→ Deleted old image " + tag + " (keeping the newest " + strconv.Itoa(w.KeepImages) + ")")
+	}
 }

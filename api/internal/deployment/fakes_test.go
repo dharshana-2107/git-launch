@@ -5,6 +5,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -121,6 +123,61 @@ func (m *memStore) LiveByProject(ctx context.Context, projectID int64) (Deployme
 	return Deployment{}, ErrNotFound
 }
 
+func (m *memStore) CountLive(ctx context.Context) (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	n := 0
+	for _, d := range m.deps {
+		if d.Status == StatusLive {
+			n++
+		}
+	}
+	return n, nil
+}
+
+// OldImages mirrors the SQL: group by tag, newest use first (by id here),
+// skip tags that are live or already pruned, then skip the newest `keep`.
+func (m *memStore) OldImages(ctx context.Context, projectID int64, keep int) ([]string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	lastUse := map[string]int64{}
+	live := map[string]bool{}
+	for _, d := range m.deps {
+		if d.ProjectID != projectID || d.ImageTag == "" || d.ImagePruned {
+			continue
+		}
+		if d.ID > lastUse[d.ImageTag] {
+			lastUse[d.ImageTag] = d.ID
+		}
+		if d.Status == StatusLive {
+			live[d.ImageTag] = true
+		}
+	}
+	tags := []string{}
+	for t := range lastUse {
+		if !live[t] {
+			tags = append(tags, t)
+		}
+	}
+	sort.Slice(tags, func(i, j int) bool { return lastUse[tags[i]] > lastUse[tags[j]] })
+	if keep >= len(tags) {
+		return []string{}, nil
+	}
+	return tags[keep:], nil
+}
+
+func (m *memStore) MarkImagePruned(ctx context.Context, projectID int64, tag string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for id, d := range m.deps {
+		if d.ProjectID == projectID && d.ImageTag == tag {
+			d.ImagePruned = true
+			m.deps[id] = d
+		}
+	}
+	return nil
+}
+
 func (m *memStore) Fail(ctx context.Context, id int64, reason string) error {
 	return m.update(id, func(d *Deployment) { d.Status, d.Error = StatusFailed, reason })
 }
@@ -177,6 +234,8 @@ type fakeRunner struct {
 	appPort      string // what "docker port" reports: a test HTTP server's port
 	appCrashes   bool   // "docker inspect" reports the container exited
 	imageMissing bool   // "docker image inspect" fails (image was deleted)
+	newCommits   bool   // every clone gets a new commit SHA (default: always abc1234)
+	clones       int
 
 	mu       sync.Mutex
 	commands []string // every docker command run, for assertions
@@ -220,6 +279,10 @@ func (f *fakeRunner) Run(ctx context.Context, dir string, onLine func(string), n
 func (f *fakeRunner) Output(ctx context.Context, dir string, name string, args ...string) (string, error) {
 	if name == "git" {
 		if args[0] == "rev-parse" {
+			if f.newCommits {
+				f.clones++
+				return "c" + strconv.Itoa(1000000 + f.clones)[1:], nil // c000001, c000002...
+			}
 			return "abc1234", nil
 		}
 		return "Initial commit", nil
@@ -236,6 +299,8 @@ func (f *fakeRunner) Output(ctx context.Context, dir string, name string, args .
 			return "", errors.New("no such image")
 		}
 		return "sha256:abc", nil
+	case "images":
+		return "", nil
 	case "port":
 		if f.appCrashes {
 			return "127.0.0.1:1", nil // nothing listens there: the app never answers
