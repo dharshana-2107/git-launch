@@ -1,8 +1,7 @@
 # Launchpad
 
-A self-hosted deployment platform, a small Vercel/Render. Point it at a GitHub repo with a Dockerfile, and every `git push` builds the image, health-checks it and switches traffic to it at `http://<subdomain>.localhost`, with zero downtime, live build logs and one-click rollback.
+A self-hosted deployment platform which points at a GitHub repo with a **Dockerfile**, and every `git push` builds the image, health-checks it and switches traffic to it at `http://<subdomain>.localhost`, with zero downtime, live build logs and one-click rollback.
 
-![CI](https://github.com/dharshana-2107/launchpad/actions/workflows/ci.yml/badge.svg)
 
 **Features**
 
@@ -107,23 +106,22 @@ npm install                   # first time only
 npm run dev
 ```
 
-Open http://localhost:5173 (Chrome or Firefox: Safari may not resolve `*.localhost`).
+Open http://localhost:5173
 
 ### 5. Deploy something
 
-1. Push `samples/hello-app` to its own public GitHub repo.
-2. **New project** → that repo's URL, branch `main`, subdomain `hello` → **Deploy**.
-3. When it says **live**, open http://hello.localhost.
+1. **New project** → that repo's URL, branch `main`, subdomain name → **Deploy**.
+2. When it says **live**, open http://<sub-domain>.localhost.
 
 ### 6. Deploy on git push (optional)
 
 ```bash
 brew install cloudflared
-export WEBHOOK_SECRET=<any long random text>       # in terminal 1, then restart the API
-cloudflared tunnel --url http://localhost:8080     # terminal 3: prints https://….trycloudflare.com
+export WEBHOOK_SECRET=<any long random text>       
+cloudflared tunnel --url http://localhost:8080  
 ```
 
-In the hello-app repo on GitHub: **Settings → Webhooks → Add webhook**. Payload URL `https://….trycloudflare.com/api/webhooks/github`, content type `application/json`, the same secret, "Just the push event". Push a commit and watch it deploy. Only the webhook path is reachable through the tunnel; everything else answers 403.
+In the repo on GitHub: **Settings → Webhooks → Add webhook**. Payload URL `https://….trycloudflare.com/api/webhooks/github`, content type `application/json`, the same secret, "Just the push event". Push a commit and watch it deploy. Only the webhook path is reachable through the tunnel; everything else answers 403.
 
 ### Tests
 
